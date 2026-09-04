@@ -1,0 +1,11 @@
+.vs/
+bin/
+obj/
+dist/
+logs/
+diagnostics/
+*.log
+*.zip
+*.user
+*.suo
+seen-tokens.txt
