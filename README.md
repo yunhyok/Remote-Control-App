@@ -109,4 +109,4 @@ Slave에는 판독 중 경과 시간과 완료 상태가 표시됩니다. **Slav
 
 Master는 별도 **개별 자기 대화창**을 인식하며, 검증된 입력·커서 이동·클릭 전송을 요청당 한 번만 수행합니다. Send 위에 미리 마우스를 놓을 필요는 없습니다. Master 창/전경 변경이나 입력 간섭은 중단 사유입니다. Slave 캡처는 창 활성화·마우스/키보드 입력을 하지 않습니다.
 
-이번 `Remote-Monitor-Slave-v0.1.48-win11-net48.zip`에는 Slave .NET Framework 4.8 EXE/config와 README/SLAVE-TEST만 들어 있습니다. 사용자에게 SELF-TEST.cmd 실행을 요구하지 않습니다. 내부 검사는 본문 경계 후보·픽셀 복제·하단 보존·요청 이미지 구분·실행/이미지 선택·같은 OCR PNG 재사용·현재 모델 선택·취소·로그 제외, 기존 전체 버퍼/LLM/통신 검사를 포함합니다. 실제 Output 식별과 숫자 전사 정확도는 현장 확인 대상입니다. 장시간 대기는 후순위입니다.
+`Remote-Monitor-Slave-v0.1.48-win11-net48.zip`은 Slave .NET Framework 4.8 EXE/config와 README/SLAVE-TEST를 포함하며, GitHub 인수인계 이후 빌드는 HANDOFF도 포함합니다. 전체 `Remote-Monitor-v0.1.48-win7-win11-net48.zip`에는 Master EXE/config와 보관용 WIN7-TEST가 추가됩니다. 현재 시험에서는 Slave만 실행합니다. 사용자에게 SELF-TEST.cmd 실행을 요구하지 않습니다. 내부 검사는 본문 경계 후보·픽셀 복제·하단 보존·요청 이미지 구분·실행/이미지 선택·같은 OCR PNG 재사용·현재 모델 선택·취소·로그 제외, 기존 전체 버퍼/LLM/통신 검사를 포함합니다. 실제 Output 식별과 숫자 전사 정확도는 현장 확인 대상입니다. 장시간 대기는 후순위입니다.
