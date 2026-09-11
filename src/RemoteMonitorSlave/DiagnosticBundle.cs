@@ -16,12 +16,14 @@ namespace RemoteMonitorSlave
     // API: DiagnosticBundleContent is the whole export: buffer read metadata, the full Output text,
     // API:   an optional path to the current diagnostic log (copied verbatim if it exists and is
     // API:   readable; never written to the archive as a path -- only its content, and only a
-    // API:   log_included flag reaches manifest.json), and the run list.
+    // API:   log_included flag reaches manifest.json), the run list, and optionally the capture the
+    // API:   auto-copy worker took when it aborted (AutoCopyFramePng -> auto-copy-frame.png, with its
+    // API:   code/detail in manifest.json as auto_copy_last_failure).
     // API: DiagnosticBundle.Write(target, content) builds one ZIP into `target`, an already-open,
     // API:   writable Stream the CALLER owns and disposes -- Write leaves it open (ZipArchiveMode
     // API:   .Create with leaveOpen:true) so a caller can inspect or reuse it afterwards. Entry
     // API:   order is fixed and content-independent: README.txt, manifest.json, full-text.txt,
-    // API:   slave-log.txt, then for each run in list order runs/NN-<sanitized label>/
+    // API:   slave-log.txt, auto-copy-frame.png, then for each run in list order runs/NN-<sanitized label>/
     // API:   {full-frame,suggested,body,ocr-input}.png, transcript.txt, comparison.txt, run.json --
     // API:   so identical content always yields identical entry ordering. manifest.json and each
     // API:   run.json carry metadata only (labels/codes/diagnostics/SHA-256 of every image entry);
@@ -63,6 +65,9 @@ namespace RemoteMonitorSlave
         internal string BufferDetail;
         internal string FullText;
         internal string LogFilePath;
+        // The auto-copy worker's own capture of a failed attempt, plus its "<CODE> <detail>" summary.
+        internal byte[] AutoCopyFramePng;
+        internal string AutoCopyLastFailure;
         internal List<DiagnosticBundleRun> Runs = new List<DiagnosticBundleRun>();
         internal string Notes;
     }
@@ -78,7 +83,8 @@ namespace RemoteMonitorSlave
             "이 압축 파일에는 화면 캡처 이미지와 Output 판독 원문 등 사내 고유 정보가 포함되어 있습니다.\r\n" +
             "Git 등 공개 저장소나 외부 공유 채널에 올리지 말고, 소유자가 필요하다고 판단한 담당자에게만 직접 전달하세요.\r\n" +
             "구성: manifest.json(메타데이터/해시), full-text.txt(Output 전체 텍스트),\r\n" +
-            "slave-log.txt(진단 로그 사본, 있는 경우), runs\\NN-이름\\ (화면 이미지, 대조 결과, 실행별 상세).\r\n";
+            "slave-log.txt(진단 로그 사본, 있는 경우), auto-copy-frame.png(자동 복사 실패 시의 화면, 있는 경우),\r\n" +
+            "runs\\NN-이름\\ (화면 이미지, 대조 결과, 실행별 상세).\r\n";
 
         internal static void Write(Stream target, DiagnosticBundleContent content)
         {
@@ -125,10 +131,14 @@ namespace RemoteMonitorSlave
                     { "comparison_included", run.Comparison != null }, { "metadata", run.Metadata }, { "images", images } });
             }
 
+            var autoCopyImages = new Dictionary<string, object>();
+            AddImageManifest(autoCopyImages, "auto_copy_frame", "auto-copy-frame.png", content.AutoCopyFramePng);
+
             var manifest = new Dictionary<string, object> {
                 { "version", content.Version }, { "created_utc", content.CreatedUtc.ToString("o", CultureInfo.InvariantCulture) },
                 { "buffer_code", content.BufferCode }, { "buffer_method", content.BufferMethod }, { "buffer_detail", content.BufferDetail },
                 { "full_text_included", content.FullText != null }, { "log_included", logBytes != null },
+                { "auto_copy_last_failure", content.AutoCopyLastFailure }, { "auto_copy_images", autoCopyImages },
                 { "notes", content.Notes }, { "runs", manifestRuns } };
             var manifestText = Serialize(manifest);
 
@@ -138,6 +148,7 @@ namespace RemoteMonitorSlave
                 WriteTextEntry(archive, "manifest.json", manifestText, false);
                 if (content.FullText != null) WriteTextEntry(archive, "full-text.txt", content.FullText, true);
                 if (logBytes != null) WriteBinaryEntry(archive, "slave-log.txt", logBytes);
+                if (content.AutoCopyFramePng != null) WriteBinaryEntry(archive, "auto-copy-frame.png", content.AutoCopyFramePng);
                 for (var i = 0; i < runs.Count; i++)
                 {
                     var run = runs[i] ?? new DiagnosticBundleRun();
@@ -163,14 +174,16 @@ namespace RemoteMonitorSlave
         {
             var content = new DiagnosticBundleContent
             {
-                Version = "0.1.49-selftest",
+                Version = "0.1.50-selftest",
                 CreatedUtc = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc),
                 BufferCode = "BUFFER_READ",
                 BufferMethod = "NATIVE_WM_GETTEXT",
                 BufferDetail = "NATIVE=1,UIA=0",
                 FullText = "완료\r\n끝",
                 Notes = "self-test synthetic bundle",
-                LogFilePath = null
+                LogFilePath = null,
+                AutoCopyFramePng = new byte[] { 0xA, 0xB, 0xC, 0xD },
+                AutoCopyLastFailure = "AUTO_COPY_OCCLUDED OCCLUDER|SELF"
             };
             content.Runs.Add(new DiagnosticBundleRun
             {
@@ -212,6 +225,11 @@ namespace RemoteMonitorSlave
                 if (names.Contains("slave-log.txt"))
                     throw new InvalidOperationException("Diagnostic bundle wrote a log entry with no log path given.");
 
+                var autoCopyHash = ComputeHashHex(content.AutoCopyFramePng);
+                if (!names.Contains("auto-copy-frame.png") ||
+                    !ReadEntryBytes(archive, "auto-copy-frame.png").SequenceEqual(content.AutoCopyFramePng))
+                    throw new InvalidOperationException("Diagnostic bundle lost the failed auto-copy capture.");
+
                 var readme = ReadEntryText(archive, "README.txt");
                 if (!readme.Contains("공개 저장소") || !readme.Contains("고유 정보"))
                     throw new InvalidOperationException("Diagnostic bundle README is missing the Korean sharing warning.");
@@ -232,6 +250,9 @@ namespace RemoteMonitorSlave
                 var manifestJson = ReadEntryText(archive, "manifest.json");
                 if (!manifestJson.Contains(expectedFrameHash) || manifestJson.Contains(content.Runs[0].Transcript))
                     throw new InvalidOperationException("Diagnostic bundle manifest hash/metadata-only content is wrong.");
+                if (!manifestJson.Contains(autoCopyHash) || !manifestJson.Contains("auto_copy_last_failure") ||
+                    !manifestJson.Contains("AUTO_COPY_OCCLUDED"))
+                    throw new InvalidOperationException("Diagnostic bundle manifest lost the auto-copy failure metadata.");
 
                 var actualFrameBytes = ReadEntryBytes(archive, run1Dir + "full-frame.png");
                 if (!actualFrameBytes.SequenceEqual(content.Runs[0].FullFramePng) || ComputeHashHex(actualFrameBytes) != expectedFrameHash)

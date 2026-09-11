@@ -56,7 +56,7 @@ namespace RemoteMonitorSlave
             settings.AutoCopyEnabled = false;
             Save(path, settings);
             if (Load(path).AutoCopyEnabled) throw new InvalidOperationException("Disabled Output auto copy was not persisted.");
-            // A settings file written before v0.1.49 has no auto-copy key and must load with the default.
+            // A settings file written before the auto-copy option existed has no such key and must load with the default.
             var legacy = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
             legacy.Remove("auto_copy");
             File.WriteAllText(path, new JavaScriptSerializer().Serialize(legacy), new UTF8Encoding(false));

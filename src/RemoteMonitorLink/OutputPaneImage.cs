@@ -17,6 +17,9 @@ namespace RemoteMonitorLink
         internal int FrameWidth, FrameHeight;
         internal int Components;
         internal int Accepted;
+        // RejectedCenter is field 8 of B2: centre/containment rejections -- the candidate neither contains the
+        // proposal centre nor lies almost entirely (>=90% of its own area) inside the proposal. The B2 field
+        // order and count are unchanged from the previous version; only what the rule counts was widened.
         internal int RejectedSize, RejectedFill, RejectedTooLarge, RejectedCenter, RejectedOverlap;
         internal Rectangle? First, Second;
 
@@ -41,6 +44,8 @@ namespace RemoteMonitorLink
         //   byte[] OcrInput(frame, body)                                             — unchanged.
         // Every failure is LocalVisionException("REGION_BOUNDARY_UNCONFIRMED") with Detail = diag.Summary()
         // (metadata only) whenever a scan actually ran; IMAGE_INVALID keeps its own code and no Detail.
+        // A candidate is accepted when it contains the proposal centre OR lies almost entirely inside the
+        // proposal (>=90% of the candidate's own area); exactly one accepted candidate is still required.
         //
         // ponytail: temporary PowerSI flat neutral-background heuristic, not semantic pane identification.
         // Textured/colored panes or panes covering >=90% of the frame need verified UIA geometry instead.
@@ -88,9 +93,13 @@ namespace RemoteMonitorLink
                 if (bounds.Width < 120 || bounds.Height < 80 || tail < 10000) { diag.RejectedSize++; continue; }
                 if (tail * 100L < area * 55) { diag.RejectedFill++; continue; }
                 if (area * 10 >= (long)width * height * 9) { diag.RejectedTooLarge++; continue; }
-                if (!bounds.Contains(center)) { diag.RejectedCenter++; continue; }
                 var overlap = Rectangle.Intersect(bounds, suggested);
-                if ((long)overlap.Width * overlap.Height * 2 < Math.Min(area, (long)suggested.Width * suggested.Height))
+                long overlapArea = (long)overlap.Width * overlap.Height;
+                // A proposal may be far wider than the body (a model that swallowed neighbouring panes), so its
+                // centre can fall outside the correct candidate. Accept such a candidate when it is mostly inside
+                // the proposal instead. Field case (2026-09-11): body 317|393|585|560, proposal 320|385|1570|574.
+                if (!bounds.Contains(center) && overlapArea * 10 < area * 9) { diag.RejectedCenter++; continue; }
+                if (overlapArea * 2 < Math.Min(area, (long)suggested.Width * suggested.Height))
                 { diag.RejectedOverlap++; continue; }
                 diag.Accepted++;
                 if (found.HasValue) { diag.Second = bounds; throw Unconfirmed(diag); }
@@ -359,6 +368,32 @@ namespace RemoteMonitorLink
                 }
                 var ambiguous = RejectDetail(() => FindBody(Frame(bitmap), new Rectangle(140, 140, 120, 100), CancellationToken.None)).Split('|');
                 Check(ambiguous[4] == "2", "two bodies overlapping the proposal are both reported before the failure");
+                // Both bodies are almost entirely inside this huge proposal: containment must not resolve the ambiguity.
+                var enclosed = RejectDetail(() => FindBody(Frame(bitmap), new Rectangle(10, 10, 580, 400), CancellationToken.None)).Split('|');
+                Check(enclosed[4] == "2", "a proposal enclosing two bodies stays ambiguous");
+            }
+            // 2026-09-11 field geometry at the real frame size: the proposal keeps the correct left/top/height but is
+            // far too wide, so its centre lands on a neighbouring pane area. The body must still be accepted.
+            using (var bitmap = new Bitmap(1920, 1009, PixelFormat.Format24bppRgb))
+            {
+                var fieldBody = new Rectangle(317, 393, 585, 560);
+                using (var graphics = Graphics.FromImage(bitmap))
+                using (var background = new SolidBrush(Color.FromArgb(240, 240, 240)))
+                {
+                    graphics.Clear(Color.DarkBlue);
+                    graphics.FillRectangle(background, fieldBody);
+                    for (int y = 400; y < 945; y += 16) graphics.FillRectangle(Brushes.Black, 325, y, 560, 2);
+                }
+                var frame = Frame(bitmap);
+                BodySearchDiagnostics wide;
+                Check(FindBody(frame, new Rectangle(320, 385, 1570, 574), CancellationToken.None, out wide) == fieldBody &&
+                    wide.Accepted == 1 && wide.FrameWidth == 1920 && wide.FrameHeight == 1009,
+                    "a too-wide proposal that still encloses the body accepts it");
+                // The other field proposal covered a different pane entirely: no overlap, no containment, no body.
+                RejectDetail(() => FindBody(frame, new Rectangle(1420, 260, 462, 376), CancellationToken.None));
+                BodySearchDiagnostics anchoredField;
+                Check(FindBodyAt(frame, new Point(609, 673), CancellationToken.None, out anchoredField) == fieldBody,
+                    "the learned click point resolves the same field body");
             }
         }
     }

@@ -36,6 +36,11 @@ namespace RemoteMonitorSlave
         // Learned Output click position. Memory only: never written to disk, never sent anywhere, dropped on exit.
         private OutputAnchor learnedAnchor;   // Confirmed on a captured frame; the only anchor auto copy may use.
         private OutputAnchor pendingAnchor;   // Sampled during a manual copy but not confirmed on a frame.
+        private string lastAutoCopyCode;      // Outcome code of the most recent auto-copy attempt, for the status line.
+        // The worker capture of the most recent FAILED auto copy (memory only, last one kept) and its code/detail.
+        // It is what explains an abort, so it stays available for the diagnostic bundle until a newer failure.
+        private byte[] autoCopyFrame;
+        private string autoCopyFailure;
         private readonly Dictionary<PowerSiObservation, string> comparisonReports = new Dictionary<PowerSiObservation, string>();
         private readonly System.Windows.Forms.Timer remoteProgress = new System.Windows.Forms.Timer { Interval = 1000 };
         private Stopwatch remoteClock;
@@ -475,6 +480,7 @@ namespace RemoteMonitorSlave
                     BodySearchDiagnostics search;
                     var body = OutputPaneImage.FindBodyAt(frame, sampled.ClientPoint, CancellationToken.None, out search);
                     diagnostics = search == null ? "NONE" : search.Summary();
+                    sampled.Body = body; // The worker clicks this body's centre and re-verifies it after the click.
                     learnedAnchor = sampled;
                     pendingAnchor = null;
                     try { log.Write("OUTPUT_ANCHOR_LEARNED", "anchor=" + sampled.Serialize() + " body=" + BoxText(body) + " diag=" + LogValue(diagnostics)); }
@@ -498,9 +504,37 @@ namespace RemoteMonitorSlave
 
         private void UpdateAnchorState()
         {
-            anchorState.Text = "자동 복사 위치: " + AnchorStateText() + " / 자동 복사 설정: " +
-                (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + Environment.NewLine +
-                "수동 복사 한 번으로 위치를 배우고 같은 실행의 화면에서 다시 확인합니다. 위치는 메모리에만 두며 앱을 닫으면 사라집니다.";
+            anchorState.Text = "자동 복사 위치: " + AnchorStateText() + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
+                " / 자동 복사 설정: " + (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + Environment.NewLine +
+                "수동 복사 한 번으로 위치를 배우고 같은 실행의 화면에서 다시 확인합니다. 자동 복사 동안 이 창은 잠시 최소화되며 위치는 메모리에만 둡니다.";
+        }
+
+        // The Slave's own window can sit over the PowerSI Output pane; the worker's hit test would then abort with
+        // AUTO_COPY_OCCLUDED (the 2026-09-11 field result). Minimize ourselves and every open owned dialog while the
+        // worker runs, and put every window back afterwards, whatever the outcome.
+        private List<KeyValuePair<Form, FormWindowState>> MinimizeForAutoCopy()
+        {
+            var hidden = new List<KeyValuePair<Form, FormWindowState>>();
+            foreach (var owned in OwnedForms)
+            {
+                if (owned == null || owned.IsDisposed || !owned.Visible) continue;
+                hidden.Add(new KeyValuePair<Form, FormWindowState>(owned, owned.WindowState));
+                try { owned.WindowState = FormWindowState.Minimized; } catch { }
+            }
+            hidden.Add(new KeyValuePair<Form, FormWindowState>(this, WindowState));
+            try { WindowState = FormWindowState.Minimized; } catch { }
+            return hidden;
+        }
+
+        private void RestoreAfterAutoCopy(List<KeyValuePair<Form, FormWindowState>> hidden)
+        {
+            if (hidden == null) return;
+            for (int index = hidden.Count - 1; index >= 0; index--)
+            {
+                var form = hidden[index].Key;
+                if (form == null || form.IsDisposed) continue;
+                try { form.WindowState = hidden[index].Value; } catch { }
+            }
         }
 
         private static string BoxText(Rectangle box)
@@ -580,11 +614,19 @@ namespace RemoteMonitorSlave
                     var anchor = visionSettings.AutoCopyEnabled ? MatchingAnchor(inventory) : null;
                     if (anchor != null)
                     {
-                        log.Write("OUTPUT_AUTO_COPY_BEGIN");
-                        ShowActivity("학습한 Output 위치로 자동 복사 중 — 마우스·키보드를 건드리지 마세요 (최대8초) / Stop 가능");
-                        var automatic = await OutputAutoCopy.AutoCopyAsync(inventory, anchor, clipboardBaseline, cancellation.Token);
+                        log.Write("OUTPUT_AUTO_COPY_BEGIN", "self_hidden=1");
+                        ShowActivity("학습한 Output 위치로 자동 복사 중 — 이 창을 잠시 최소화합니다. 마우스·키보드를 건드리지 마세요 (최대8초) / Stop 가능");
+                        OutputBufferResult automatic;
+                        var hidden = MinimizeForAutoCopy();
+                        try
+                        {
+                            await Task.Delay(300, cancellation.Token); // Let the minimize reach the desktop before the hit test.
+                            automatic = await OutputAutoCopy.AutoCopyAsync(inventory, anchor, clipboardBaseline, cancellation.Token);
+                        }
+                        finally { RestoreAfterAutoCopy(hidden); }
                         cancellation.Token.ThrowIfCancellationRequested();
                         if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
+                        lastAutoCopyCode = automatic.Code;
                         if (automatic.Code == "AUTO_COPY_READ" && automatic.Text != null)
                         {
                             result = automatic;
@@ -594,9 +636,17 @@ namespace RemoteMonitorSlave
                         else
                         {
                             log.Write("OUTPUT_AUTO_COPY_FAILED", "code=" + LogValue(automatic.Code) + " detail=" + LogValue(automatic.Detail));
+                            // Keep the worker's own capture of the abort (last one only) for the diagnostic bundle.
+                            var abortedFrame = OutputAutoCopy.FrameOf(automatic);
+                            if (abortedFrame != null)
+                            {
+                                autoCopyFrame = abortedFrame;
+                                autoCopyFailure = automatic.Code + " " + automatic.Detail;
+                            }
                             // A failed attempt may still have changed the clipboard; the manual wait must not accept it.
                             clipboardBaseline = OutputBufferCapture.ClipboardSequence;
                         }
+                        UpdateAnchorState();
                     }
                 }
                 if (result.Text == null && result.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
@@ -901,7 +951,10 @@ namespace RemoteMonitorSlave
                 BufferDetail = buffer == null ? null : buffer.Detail,
                 FullText = buffer == null ? null : buffer.Text,
                 LogFilePath = log.Path,
-                Notes = "자동 복사 위치: " + AnchorStateText() + " / 자동 복사 설정: " +
+                AutoCopyFramePng = autoCopyFrame,
+                AutoCopyLastFailure = autoCopyFailure,
+                Notes = "자동 복사 위치: " + AnchorStateText() + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
+                    " / 자동 복사 설정: " +
                     (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + " / 전체 텍스트: " +
                     (buffer == null ? "없음" : buffer.Code + " " + buffer.Method + " " + buffer.Detail) +
                     " / v" + LinkVersion.Value + "의 자동 복사·대조는 현장 미검증입니다."
@@ -1474,7 +1527,7 @@ namespace RemoteMonitorSlave
                         if (selector.Items.Count != 1 || !selector.Text.StartsWith("PowerSI 전체"))
                             throw new InvalidOperationException("Failed localization displayed whole image as crop.");
                     }
-                    // v0.1.49: learned auto-copy position, 원문 대조 and the diagnostic bundle content.
+                    // Learned auto-copy position, 원문 대조 and the diagnostic bundle content.
                     PowerSiFrame bodyFrame;
                     using (var bitmap = new Bitmap(600, 420, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
                     {
@@ -1516,6 +1569,11 @@ namespace RemoteMonitorSlave
                     if (!ReferenceEquals(form.learnedAnchor, learnedPoint) || form.pendingAnchor != null ||
                         !form.anchorState.Text.Contains("자동 복사 위치: 학습됨"))
                         throw new InvalidOperationException("Confirmed Output position was not learned.");
+                    // The confirmed body travels with the anchor (A2) so the worker can click its centre.
+                    if (!learnedPoint.HasBody || learnedPoint.Body != new Rectangle(20, 40, 360, 320) ||
+                        !learnedPoint.Serialize().StartsWith("A2|", StringComparison.Ordinal) ||
+                        !form.anchorState.Text.Contains("최근 자동 복사: 없음"))
+                        throw new InvalidOperationException("A confirmed anchor did not carry its body to the worker.");
                     var sameInstance = new OutputAnchor { Pid = 4321, StartUtcTicks = 9876, SessionId = 1,
                         ClientPoint = new Point(1, 1), ClientSize = new Size(40, 30), LearnedUtc = DateTime.UtcNow };
                     form.LearnOutputAnchor(sameInstance, anchorVision);
@@ -1542,10 +1600,21 @@ namespace RemoteMonitorSlave
                         if (!bundleButton.Enabled || !bundleButton.Text.StartsWith("진단 묶음 저장"))
                             throw new InvalidOperationException("Diagnostic bundle save was unavailable in the comparison view.");
                     }
+                    // A failed auto copy keeps its own capture and shows its code in the status line.
+                    form.lastAutoCopyCode = "AUTO_COPY_OCCLUDED";
+                    form.autoCopyFrame = bodyFrame.Png;
+                    form.autoCopyFailure = "AUTO_COPY_OCCLUDED OCCLUDER|SELF";
+                    form.UpdateAnchorState();
+                    if (!form.anchorState.Text.Contains("최근 자동 복사: AUTO_COPY_OCCLUDED") ||
+                        !form.anchorState.Text.Contains("자동 복사 위치: 학습됨"))
+                        throw new InvalidOperationException("Status line did not show the last auto copy outcome.");
                     var bundle = form.BuildBundleContent(new[] { anchorVision });
                     if (bundle.FullText != copiedBuffer.Text || bundle.LogFilePath != form.log.Path || bundle.Runs.Count != 1 ||
                         bundle.Runs[0].Comparison == null || bundle.Runs[0].Transcript == null ||
                         bundle.Runs[0].BodyDiagnostics != anchorVision.LocalBodyDiagnostics ||
+                        !ReferenceEquals(bundle.AutoCopyFramePng, bodyFrame.Png) ||
+                        bundle.AutoCopyLastFailure != "AUTO_COPY_OCCLUDED OCCLUDER|SELF" ||
+                        !bundle.Notes.Contains("최근 자동 복사: AUTO_COPY_OCCLUDED") ||
                         !bundle.Runs[0].Metadata.StartsWith("VISION_RUN") || !bundle.Runs[0].Metadata.Contains("frame=600x420") ||
                         !bundle.Runs[0].Metadata.Contains("body=B2|600|420") || bundle.Version != LinkVersion.Value)
                         throw new InvalidOperationException("Diagnostic bundle content lost the run, comparison or metadata.");
@@ -1555,7 +1624,7 @@ namespace RemoteMonitorSlave
                         memory.Position = 0;
                         using (var archive = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Read))
                             if (archive.GetEntry("full-text.txt") == null || archive.GetEntry("slave-log.txt") == null ||
-                                archive.GetEntry("README.txt") == null ||
+                                archive.GetEntry("README.txt") == null || archive.GetEntry("auto-copy-frame.png") == null ||
                                 !archive.Entries.Any(entry => entry.FullName.EndsWith("comparison.txt", StringComparison.Ordinal)) ||
                                 !archive.Entries.Any(entry => entry.FullName.EndsWith("full-frame.png", StringComparison.Ordinal)))
                                 throw new InvalidOperationException("Diagnostic bundle did not contain the exported screen/text entries.");

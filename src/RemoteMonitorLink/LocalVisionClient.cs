@@ -81,6 +81,10 @@ namespace RemoteMonitorLink
     {
         private const int MaxResponseBytes = 256 * 1024;
         private const int MaxImageBytes = 8 * 1024 * 1024;
+        // A locate answer is one short line; a transcript is up to 12 log lines. The 2026-09-11 field runs showed a
+        // reasoning model spending the whole budget on reasoning_content, so the OCR budget is the larger one.
+        private const int LocateMaxTokens = 2048;
+        private const int ReadMaxTokens = 4096;
         private const string Unreadable = "[OUTPUT_UNREADABLE]";
         private const string LocatePrompt =
             "Locate the visible pane headed Output in this full PowerSI application screenshot. " +
@@ -135,17 +139,17 @@ namespace RemoteMonitorLink
         {
             if (width <= 0 || height <= 0) throw new LocalVisionException("IMAGE_INVALID");
             return RequestAsync(settings, png, LocatePrompt, "Locate the Output pane in this original full screenshot.",
-                (json, model) => ParseRegion(json, model, width, height), cancellation);
+                LocateMaxTokens, (json, model) => ParseRegion(json, model, width, height), cancellation);
         }
 
         internal static Task<VisionReading> ReadAsync(LocalVisionSettings settings, byte[] png, CancellationToken cancellation)
         {
             return RequestAsync(settings, png, ReadPrompt, "Copy the bottommost visible log lines verbatim, at most 12 lines. Read every number digit by digit without rounding or filling missing digits. Do not summarize or paraphrase. The heading need not be visible. If the log is unreadable, return " + Unreadable + ".",
-                ParseReading, cancellation);
+                ReadMaxTokens, ParseReading, cancellation);
         }
 
         private static async Task<T> RequestAsync<T>(LocalVisionSettings settings, byte[] png, string prompt, string instruction,
-            Func<string, string, T> parse, CancellationToken cancellation)
+            int maxTokens, Func<string, string, T> parse, CancellationToken cancellation)
         {
             settings = Snapshot(settings);
             if (!settings.Enabled) throw new LocalVisionException("DISABLED");
@@ -162,7 +166,7 @@ namespace RemoteMonitorLink
                     LocalVisionModel[] models = await ListModelsAsync(settings, deadline.Token).ConfigureAwait(false);
                     string model = SelectModel(models, settings.ModelId);
                     selected = models.Single(m => m.Id == model);
-                    string payload = CreatePayload(model, png, prompt, instruction);
+                    string payload = CreatePayload(model, png, prompt, instruction, maxTokens);
                     deadline.Token.ThrowIfCancellationRequested();
                     string json = await SendAsync(settings, "/v1/chat/completions", payload, deadline.Token).ConfigureAwait(false);
                     T result;
@@ -331,11 +335,14 @@ namespace RemoteMonitorLink
         private static string ModelLabel(string value)
         { return string.IsNullOrWhiteSpace(value) || value.Length > 256 || value.Any(char.IsControl) ? "UNKNOWN" : value; }
 
-        private static string CreatePayload(string model, byte[] png, string prompt, string instruction)
+        private static string CreatePayload(string model, byte[] png, string prompt, string instruction, int maxTokens)
         {
             return Serializer(MaxImageBytes * 2).Serialize(new
             {
-                model = model, temperature = 0, max_tokens = 2048, stream = false,
+                model = model, temperature = 0, max_tokens = maxTokens, stream = false,
+                // llama.cpp-style servers turn thinking off for this request; servers that do not know the
+                // field ignore it. We never accept reasoning text as the transcript, so thinking only costs budget.
+                chat_template_kwargs = new { enable_thinking = false },
                 messages = new object[] { new { role = "system", content = prompt }, new { role = "user", content = new object[] {
                     new { type = "image_url", image_url = new { url = "data:image/png;base64," + Convert.ToBase64String(png) } },
                     new { type = "text", text = instruction } } } }
@@ -351,9 +358,16 @@ namespace RemoteMonitorLink
             var choice = choices[0] as Dictionary<string, object>;
             if (choice == null) throw new LocalVisionException("CHOICES_INVALID");
             string finish = Value(choice, "finish_reason") as string;
-            if (!string.Equals(finish, "stop", StringComparison.Ordinal))
-                throw new LocalVisionException(finish == "length" ? "INCOMPLETE_LENGTH" : "INCOMPLETE_RESPONSE");
             var message = Value(choice, "message") as Dictionary<string, object>;
+            if (!string.Equals(finish, "stop", StringComparison.Ordinal))
+            {
+                // "The thinking ate the budget" is a different problem from a plain truncated answer: the model
+                // produced only reasoning_content/reasoning and no content at all. Never use that text as output.
+                if (string.Equals(finish, "length", StringComparison.Ordinal) && ReasoningOnly(message))
+                    throw new LocalVisionException("INCOMPLETE_REASONING");
+                throw new LocalVisionException(string.Equals(finish, "length", StringComparison.Ordinal)
+                    ? "INCOMPLETE_LENGTH" : "INCOMPLETE_RESPONSE");
+            }
             if (message == null) throw new LocalVisionException("MESSAGE_INVALID");
             if (!string.Equals(Value(message, "role") as string, "assistant", StringComparison.Ordinal))
                 throw new LocalVisionException("ROLE_INVALID");
@@ -372,6 +386,15 @@ namespace RemoteMonitorLink
             if (content.Any(c => (char.IsControl(c) && c != '\r' && c != '\n' && c != '\t') ||
                 char.GetUnicodeCategory(c) == UnicodeCategory.Format)) throw new LocalVisionException("CONTENT_TEXT_CONTROL");
             return content;
+        }
+
+        // True when the message carries reasoning text but no usable content. reasoning_content is never a transcript.
+        private static bool ReasoningOnly(Dictionary<string, object> message)
+        {
+            if (message == null) return false;
+            if (!string.IsNullOrWhiteSpace(Value(message, "content") as string)) return false;
+            return !string.IsNullOrWhiteSpace(Value(message, "reasoning_content") as string) ||
+                !string.IsNullOrWhiteSpace(Value(message, "reasoning") as string);
         }
 
         private static VisionRegion ParseRegion(string json, string model, int width, int height)
@@ -491,6 +514,16 @@ namespace RemoteMonitorLink
                     ExpectCode(() => parse(boxResponse.Replace(role, role + ",\"tool_calls\":" + invalid)), "TOOL_CALLS_REJECTED");
                 ExpectCode(() => parse(boxResponse.Replace("\"stop\"", "\"length\"")), "INCOMPLETE_LENGTH");
                 ExpectCode(() => parse(boxResponse.Replace("\"stop\"", "\"unknown-reason\"")), "INCOMPLETE_RESPONSE");
+                // 2026-09-11 field case: the whole completion budget went to reasoning and `content` stayed empty.
+                foreach (string field in new[] { "reasoning_content", "reasoning" })
+                {
+                    ExpectCode(() => parse(ReasoningResponse("length", field, "OUTPUT_BOX 125 500 875 901 라고 생각", "")), "INCOMPLETE_REASONING");
+                    ExpectCode(() => parse(ReasoningResponse("length", field, "thinking", null)), "INCOMPLETE_REASONING");
+                    ExpectCode(() => parse(ReasoningResponse("unknown-reason", field, "thinking", "")), "INCOMPLETE_RESPONSE");
+                    ExpectCode(() => parse(ReasoningResponse("length", field, "   ", "")), "INCOMPLETE_LENGTH");
+                }
+                ExpectCode(() => parse(ReasoningResponse("length", null, null, "")), "INCOMPLETE_LENGTH");
+                ExpectCode(() => parse(ReasoningResponse("length", "reasoning_content", "thinking", boxText)), "INCOMPLETE_LENGTH");
                 ExpectCode(() => parse(boxResponse.Replace(role, role + ",\"function_call\":{}")), "TOOL_CALLS_REJECTED");
                 ExpectCode(() => parse(boxResponse.Replace(role, role + ",\"refusal\":\"no\"")), "RESPONSE_REFUSED");
                 ExpectCode(() => parse(boxResponse.Replace(role, role + ",\"refusal\":false")), "RESPONSE_REFUSED");
@@ -505,6 +538,9 @@ namespace RemoteMonitorLink
                 ExpectCode(() => parse(TestResponse("log\u0000text")), "CONTENT_TEXT_CONTROL");
                 ExpectCode(() => parse(TestResponse("log\u202Etext")), "CONTENT_TEXT_CONTROL");
             }
+            Check(ParseReading(ReasoningResponse("stop", "reasoning_content", "the log says 38.000", reading), "local-test").OutputText == reading &&
+                ParseRegion(ReasoningResponse("stop", "reasoning", "the box is elsewhere", boxText), "local-test", 1921, 1081).Bounds == region.Bounds,
+                "reasoning text is ignored and never joins a completed answer");
             Check(LocalPreview("a\0b\u202Ec") == "a\uFFFDb\uFFFDc" &&
                 LocalPreview(new string('x', 40001)).Length < 40100, "bounded plain-text local preview");
 
@@ -541,6 +577,9 @@ namespace RemoteMonitorLink
                     var payload = ParseObject(request.Substring(request.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4));
                     Check((string)payload["model"] == "local-test" && false.Equals(payload["stream"]) && !payload.ContainsKey("tools") &&
                         !payload.ContainsKey("functions") && !payload.ContainsKey("response_format"), "no tools or generated JSON requirement");
+                    Check(payload["max_tokens"].Equals(phase == 0 ? LocateMaxTokens : ReadMaxTokens) &&
+                        false.Equals(Object(payload["chat_template_kwargs"])["enable_thinking"]),
+                        "per-phase completion budget with server-side thinking disabled");
                     var messages = ArrayValue(payload["messages"]);
                     Check(messages.Length == 2 && (string)Object(messages[0])["role"] == "system" &&
                         (string)Object(messages[0])["content"] == (phase == 0 ? LocatePrompt : ReadPrompt), "distinct phase prompt with no chat history");
@@ -671,6 +710,15 @@ namespace RemoteMonitorLink
                 catch (OperationCanceledException) { return; }
                 throw new InvalidOperationException("Local vision self-test failed: canceled body read.");
             }
+        }
+
+        // Synthetic reasoning-model reply: `reasoningField` is "reasoning_content", "reasoning" or null.
+        private static string ReasoningResponse(string finish, string reasoningField, string reasoning, string content)
+        {
+            var message = new Dictionary<string, object> { { "role", "assistant" }, { "content", content } };
+            if (reasoningField != null) message[reasoningField] = reasoning;
+            return Serializer().Serialize(new Dictionary<string, object> { { "choices", new object[] {
+                new Dictionary<string, object> { { "finish_reason", finish }, { "message", message } } } } });
         }
 
         private static string TestResponse(string content)

@@ -15,13 +15,15 @@ namespace RemoteMonitorSlave
     // API: the only writing input path in this application. Everything else stays read-only.
     //
     // OutputAnchor
-    //   internal sealed class with fields Pid, StartUtcTicks, SessionId, ClientPoint, ClientSize, LearnedUtc.
-    //   string Serialize()                      -> "A1|pid|ticks|session|x|y|w|h|learnedTicks" (uppercase/digits/pipes only).
-    //   static bool TryParse(string, out OutputAnchor)
+    //   internal sealed class with fields Pid, StartUtcTicks, SessionId, ClientPoint, ClientSize, LearnedUtc, Body.
+    //   string Serialize()                      -> "A1|pid|ticks|session|x|y|w|h|learnedTicks" while Body is empty
+    //                                              (what the copy worker learns), "A2|<the same nine>|bx|by|bw|bh"
+    //                                              once the UI confirmed a body around the point. Uppercase/digits/pipes only.
+    //   static bool TryParse(string, out OutputAnchor)   accepts both forms; Matches() still ignores Body.
     //
     // OutputAutoCopy
     //   const string WorkerArgument             = "--powersi-output-auto-copy".
-    //   argv of the worker: --powersi-output-auto-copy <sessionId> <pid:startTicks,...> <baselineSeq> <A1|...>
+    //   argv of the worker: --powersi-output-auto-copy <sessionId> <pid:startTicks,...> <baselineSeq> <A2|...>
     //   string LearnAnchor(IntPtr root, ProcessInventory inventory)
     //       Sampled by the existing --powersi-output-copy worker right after TryReadUserCopy succeeded.
     //       Returns "A1|..." or "ANCHOR_NONE|<REASON>" (FOREGROUND, IDENTITY, CURSOR, CLIENT, OUTSIDE, SERIALIZE, SAMPLE).
@@ -36,7 +38,17 @@ namespace RemoteMonitorSlave
     //       clickX/clickY are physical SCREEN coordinates of the injected click; the body rectangle is client-relative.
     //   Task<OutputBufferResult> AutoCopyAsync(ProcessInventory, OutputAnchor, uint baseline, CancellationToken)
     //       UI-side helper. Spawns the worker process (8 s budget) so a hang cannot freeze the UI, and parses OB1.
+    //       The anchor MUST carry a confirmed Body (A2); an A1 anchor is refused with AUTO_COPY_REQUEST_INVALID.
+    //   byte[] FrameOf(OutputBufferResult result)
+    //       The worker capture taken after the click, present only on a failure result (null otherwise). It travels
+    //       in the optional 6th OB1 field; OutputBufferCapture.Serialize/Parse use AttachFrame/FrameOf for it.
     //   void SelfTest()                         Called from OutputBufferCapture.SelfTest(); Program.cs needs no change.
+    //
+    // Worker order (v0.1.50): resolve window -> identity/client-size check -> occlusion hit test at the stored body
+    //   centre -> idle-input check -> one click at that centre -> settle -> fresh capture -> FindBodyAt around the
+    //   learned point must succeed, contain the click point and match the stored body within 8 px on every edge ->
+    //   foreground/cursor re-check -> Ctrl+A, Ctrl+C -> clipboard checks. Identity, client size and the hit test are
+    //   verified BEFORE the click; the pixels are verified BEFORE any key is sent. A pixel failure sends no keys.
     //
     // Behaviour notes for phase 2:
     //   * The clipboard is NOT restored after an auto copy (the copied Output text is the result we hand to the caller).
@@ -55,19 +67,26 @@ namespace RemoteMonitorSlave
         internal Point ClientPoint;
         internal Size ClientSize;
         internal DateTime LearnedUtc;
+        // Client-pixel Output body this point was confirmed on. Rectangle.Empty until the UI confirmed it; only an
+        // anchor with a body may be used for auto copy, and the worker clicks this body's centre.
+        internal Rectangle Body;
+
+        internal bool HasBody { get { return Body.Width > 0 && Body.Height > 0; } }
 
         internal string Serialize()
         {
-            return string.Join("|", "A1", Text(Pid), Text(StartUtcTicks), Text(SessionId), Text(ClientPoint.X),
-                Text(ClientPoint.Y), Text(ClientSize.Width), Text(ClientSize.Height), Text(LearnedUtc.Ticks));
+            var head = string.Join("|", HasBody ? "A2" : "A1", Text(Pid), Text(StartUtcTicks), Text(SessionId),
+                Text(ClientPoint.X), Text(ClientPoint.Y), Text(ClientSize.Width), Text(ClientSize.Height), Text(LearnedUtc.Ticks));
+            return HasBody ? head + "|" + string.Join("|", Text(Body.X), Text(Body.Y), Text(Body.Width), Text(Body.Height)) : head;
         }
 
         internal static bool TryParse(string text, out OutputAnchor anchor)
         {
             anchor = null;
-            if (text == null || text.Length > 160) return false;
+            if (text == null || text.Length > 240) return false;
             var parts = text.Split('|');
-            if (parts.Length != 9 || parts[0] != "A1") return false;
+            bool withBody = parts.Length == 13 && parts[0] == "A2";
+            if (!withBody && (parts.Length != 9 || parts[0] != "A1")) return false;
             int pid, session, x, y, width, height;
             long start, learned;
             if (!Number(parts[1], out pid) || !Number(parts[3], out session) || !Number(parts[4], out x) ||
@@ -76,9 +95,19 @@ namespace RemoteMonitorSlave
             if (pid < 1 || start < 1 || start > DateTime.MaxValue.Ticks || learned < 1 || learned > DateTime.MaxValue.Ticks ||
                 width < 1 || height < 1 || width > MaxClientSide || height > MaxClientSide ||
                 x < 0 || y < 0 || x >= width || y >= height) return false;
+            var body = Rectangle.Empty;
+            if (withBody)
+            {
+                int bx, by, bw, bh;
+                if (!Number(parts[9], out bx) || !Number(parts[10], out by) || !Number(parts[11], out bw) ||
+                    !Number(parts[12], out bh)) return false;
+                if (bw < 1 || bh < 1 || bx < 0 || by < 0 || bx > width - bw || by > height - bh) return false;
+                body = new Rectangle(bx, by, bw, bh);
+                if (!body.Contains(new Point(x, y))) return false; // The learned point must lie inside its own body.
+            }
             anchor = new OutputAnchor { Pid = pid, StartUtcTicks = start, SessionId = session,
                 ClientPoint = new Point(x, y), ClientSize = new Size(width, height),
-                LearnedUtc = new DateTime(learned, DateTimeKind.Utc) };
+                LearnedUtc = new DateTime(learned, DateTimeKind.Utc), Body = body };
             return true;
         }
 
@@ -111,6 +140,15 @@ namespace RemoteMonitorSlave
         private const int ForegroundWaitMilliseconds = 600;
         private const int ChordGapMilliseconds = 80;
         private const int ClipboardWaitMilliseconds = 2000;
+        internal const int MaxFramePng = 8 * 1024 * 1024;  // Same bound the capture worker enforces on a frame PNG.
+        private const int SettleMilliseconds = 150;   // Let the click repaint (deselect) before the pixels are read.
+        private const int BodyTolerance = 8;          // Per-edge client-pixel drift still accepted as "the same body".
+
+        // The capture taken after the click, kept so a failure can hand it back to the UI (worker process only).
+        private static byte[] capturedFrame;
+        // The 6th OB1 field belongs to the result object, not to OutputBufferResult (a Link type that must not change).
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OutputBufferResult, byte[]> Frames =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<OutputBufferResult, byte[]>();
 
         private const uint InputMouse = 0, InputKeyboard = 1;
         private const uint MouseLeftDown = 0x0002, MouseLeftUp = 0x0004, MouseRightDown = 0x0008, MouseRightUp = 0x0010;
@@ -160,6 +198,19 @@ namespace RemoteMonitorSlave
             return OutputAnchor.TryParse(result.Detail.Substring(separator + 1), out anchor) ? anchor : null;
         }
 
+        // Worker capture that travels in the optional 6th OB1 field. Only failure results carry one.
+        internal static void AttachFrame(OutputBufferResult result, byte[] png)
+        {
+            if (result == null || png == null || png.Length == 0) return;
+            try { Frames.Remove(result); Frames.Add(result, png); } catch { }
+        }
+
+        internal static byte[] FrameOf(OutputBufferResult result)
+        {
+            byte[] png;
+            return result != null && Frames.TryGetValue(result, out png) ? png : null;
+        }
+
         // ---------------------------------------------------------------- UI side
 
         internal static Task<OutputBufferResult> AutoCopyAsync(ProcessInventory inventory, OutputAnchor anchor,
@@ -175,7 +226,9 @@ namespace RemoteMonitorSlave
                     return Task.FromResult(Result("AUTO_COPY_REQUEST_INVALID", null));
                 OutputAnchor parsed;
                 var serialized = anchor.Serialize();
-                if (!OutputAnchor.TryParse(serialized, out parsed) || !parsed.Matches(anchor))
+                // Only a confirmed body may be clicked: an unconfirmed (A1) anchor never reaches the worker.
+                if (!anchor.HasBody || !OutputAnchor.TryParse(serialized, out parsed) || !parsed.Matches(anchor) ||
+                    parsed.Body != anchor.Body)
                     return Task.FromResult(Result("AUTO_COPY_REQUEST_INVALID", null));
                 if (inventory.SessionId != anchor.SessionId ||
                     !inventory.Items.Any(p => p.Pid == anchor.Pid && p.StartUtcTicks.Value == anchor.StartUtcTicks))
@@ -195,18 +248,32 @@ namespace RemoteMonitorSlave
 
         internal static OutputBufferResult RunWorker(string[] args)
         {
+            capturedFrame = null;
             try
             {
                 uint baseline;
                 OutputAnchor anchor;
                 if (args == null || args.Length != 5 || args[0] != WorkerArgument ||
                     !uint.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out baseline) ||
-                    !OutputAnchor.TryParse(args[4], out anchor)) throw Failure("AUTO_COPY_REQUEST_INVALID", null);
-                return Run(args, anchor, baseline);
+                    !OutputAnchor.TryParse(args[4], out anchor) || !anchor.HasBody)
+                    throw Failure("AUTO_COPY_REQUEST_INVALID", null);
+                var result = Run(args, anchor, baseline);
+                capturedFrame = null; // A successful copy returns the Output text, not a screenshot.
+                return result;
             }
-            catch (AutoCopyException error) { return Result(error.Message, error.Detail); }
-            catch (InvalidDataException error) { return Result(error.Message, null); }
-            catch { return Result("AUTO_COPY_FAILED", null); }
+            catch (AutoCopyException error) { return Failed(error.Message, error.Detail); }
+            catch (InvalidDataException error) { return Failed(error.Message, null); }
+            catch { return Failed("AUTO_COPY_FAILED", null); }
+        }
+
+        // Every failure after the fresh capture hands that capture back so the UI can keep it for the bundle.
+        private static OutputBufferResult Failed(string code, string detail)
+        {
+            var result = Result(code, detail);
+            var frame = capturedFrame;
+            capturedFrame = null;
+            AttachFrame(result, frame);
+            return result;
         }
 
         private static OutputBufferResult Run(string[] args, OutputAnchor anchor, uint baseline)
@@ -216,38 +283,51 @@ namespace RemoteMonitorSlave
             var root = PowerSiScreenCapture.ResolveWindow(targetArgs); // Fresh HWND plus full PowerSI identity checks.
             CheckTarget(root, inventory, anchor);
 
-            BodySearchDiagnostics diagnostics;
-            Rectangle body;
-            var frame = CaptureFrame(root);
-            try { body = OutputPaneImage.FindBodyAt(frame, anchor.ClientPoint, CancellationToken.None, out diagnostics); }
-            catch (LocalVisionException error) { throw Failure("AUTO_COPY_BODY_UNCONFIRMED", error.Detail); }
-            var summary = diagnostics == null ? "NONE" : Sanitize(diagnostics.Summary());
-            if (body.Width < 1 || body.Height < 1 || !body.Contains(anchor.ClientPoint) ||
-                body.Right > anchor.ClientSize.Width || body.Bottom > anchor.ClientSize.Height || body.X < 0 || body.Y < 0)
-                throw Failure("AUTO_COPY_BODY_UNCONFIRMED", summary);
-
-            var target = new NativePoint { X = body.X + body.Width / 2, Y = body.Y + body.Height / 2 };
+            // The click lands on the centre of the body this anchor was confirmed on. Its identity, its client size
+            // and the hit test at this exact point are all verified live first; the pixels are verified afterwards.
+            var stored = anchor.Body;
+            var clickClient = new Point(stored.X + stored.Width / 2, stored.Y + stored.Height / 2);
+            var target = new NativePoint { X = clickClient.X, Y = clickClient.Y };
             if (!ClientToScreen(root, ref target)) throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
+            CheckOccluder(root, target);
             RequireIdleInput();
-            if (RootOf(WindowFromPhysicalPoint(target)) != root) throw Failure("AUTO_COPY_OCCLUDED", null);
             var swapped = GetSystemMetrics(SwapButtonMetric) != 0;
 
             NativePoint saved;
             var savedCursor = GetPhysicalCursorPos(out saved);
             OutputBufferResult copied;
+            Rectangle body;
+            string summary;
             try
             {
                 if (!SetPhysicalCursorPos(target.X, target.Y)) throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
                 NativePoint current;
                 if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y)
                     throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
-                if (RootOf(WindowFromPhysicalPoint(current)) != root) throw Failure("AUTO_COPY_OCCLUDED", null);
+                CheckOccluder(root, current);
                 if ((GetSystemMetrics(SwapButtonMetric) != 0) != swapped) throw Failure("AUTO_COPY_INPUT_BUSY", null);
                 ClickOnce(swapped);
+                Thread.Sleep(SettleMilliseconds);
+
+                // Pixels decide whether a key is ever sent. The click also deselects any highlighted text, so the
+                // flat-background body search sees the same neutral pane the learning run saw.
+                BodySearchDiagnostics diagnostics;
+                var frame = CaptureFrame(root);
+                capturedFrame = frame.Png != null && frame.Png.Length <= MaxFramePng ? frame.Png : null;
+                try { body = OutputPaneImage.FindBodyAt(frame, anchor.ClientPoint, CancellationToken.None, out diagnostics); }
+                catch (LocalVisionException error) { throw Failure("AUTO_COPY_BODY_UNCONFIRMED", Sanitize(error.Detail)); }
+                summary = diagnostics == null ? "NONE" : Sanitize(diagnostics.Summary());
+                if (body.Width < 1 || body.Height < 1 || !body.Contains(anchor.ClientPoint) || !body.Contains(clickClient) ||
+                    body.X < 0 || body.Y < 0 || body.Right > anchor.ClientSize.Width || body.Bottom > anchor.ClientSize.Height)
+                    throw Failure("AUTO_COPY_BODY_UNCONFIRMED", summary);
+                if (Math.Abs(body.X - stored.X) > BodyTolerance || Math.Abs(body.Y - stored.Y) > BodyTolerance ||
+                    Math.Abs(body.Right - stored.Right) > BodyTolerance || Math.Abs(body.Bottom - stored.Bottom) > BodyTolerance)
+                    throw Failure("AUTO_COPY_BODY_MOVED", summary);
+
                 WaitForeground(root);
                 if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y)
                     throw Failure("AUTO_COPY_CURSOR_MOVED", null);
-                if (RootOf(WindowFromPhysicalPoint(current)) != root) throw Failure("AUTO_COPY_OCCLUDED", null);
+                CheckOccluder(root, current);
                 Chord(root, VirtualA);
                 Thread.Sleep(ChordGapMilliseconds);
                 Chord(root, VirtualC);
@@ -313,6 +393,49 @@ namespace RemoteMonitorSlave
         }
 
         // ---------------------------------------------------------------- injection primitives
+
+        // WindowFromPhysicalPoint tells us which window would actually receive the click. On a mismatch the
+        // occluding window's process is named so the log can say what was in the way; our own windows are SELF.
+        private static void CheckOccluder(IntPtr root, NativePoint point)
+        {
+            var hit = RootOf(WindowFromPhysicalPoint(point));
+            if (hit == root) return;
+            throw Failure("AUTO_COPY_OCCLUDED", "OCCLUDER|" + OccluderName(hit));
+        }
+
+        private static string OccluderName(IntPtr window)
+        {
+            try
+            {
+                uint pid;
+                if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out pid) == 0 || pid == 0 ||
+                    pid > int.MaxValue) return "NONE";
+                using (var occluder = Process.GetProcessById((int)pid))
+                using (var self = Process.GetCurrentProcess())
+                {
+                    // The UI and this worker are the same executable, so a name match means "our own window".
+                    if (string.Equals(occluder.ProcessName, self.ProcessName, StringComparison.OrdinalIgnoreCase)) return "SELF";
+                    return SafeName(occluder.ProcessName);
+                }
+            }
+            catch { return "NONE"; }
+        }
+
+        // A process name reaches the OB1 detail and the diagnostic log, whose character sets are narrower than a
+        // Windows process name: keep [A-Za-z0-9_.-] (max 64), then fold to upper case with '_' for '.' and '-'.
+        private static string SafeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "NONE";
+            var builder = new System.Text.StringBuilder(64);
+            foreach (var letter in name)
+            {
+                if (builder.Length >= 64) break;
+                if ((letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z') || (letter >= '0' && letter <= '9'))
+                    builder.Append(char.ToUpperInvariant(letter));
+                else if (letter == '_' || letter == '.' || letter == '-') builder.Append('_');
+            }
+            return builder.Length == 0 ? "NONE" : builder.ToString();
+        }
 
         private static void RequireIdleInput()
         {
@@ -467,6 +590,29 @@ namespace RemoteMonitorSlave
                 Need(!OutputAnchor.TryParse(invalid, out rejected) && rejected == null, "malformed anchor rejected: " + (invalid ?? "null"));
             }
             Need(Sanitize(text) == text, "anchor text survives the OB1 detail character set");
+            Need(!anchor.HasBody && OutputAnchor.TryParse(text, out parsed) && parsed.Body == Rectangle.Empty,
+                "an unconfirmed anchor stays A1 and carries no body");
+
+            // The confirmed form the UI hands to the worker: the same nine fields plus the body it was confirmed on.
+            var confirmed = new OutputAnchor { Pid = 4321, StartUtcTicks = 638000000000000000L, SessionId = 2,
+                ClientPoint = new Point(609, 673), ClientSize = new Size(1920, 1009), LearnedUtc = learned,
+                Body = new Rectangle(317, 393, 585, 560) };
+            var confirmedText = confirmed.Serialize();
+            Need(confirmedText == "A2|4321|638000000000000000|2|609|673|1920|1009|" +
+                learned.Ticks.ToString(CultureInfo.InvariantCulture) + "|317|393|585|560", "confirmed anchor serialization format");
+            OutputAnchor withBody;
+            Need(OutputAnchor.TryParse(confirmedText, out withBody) && withBody.Matches(confirmed) && withBody.HasBody &&
+                withBody.Body == confirmed.Body && withBody.Serialize() == confirmedText, "confirmed anchor round trip");
+            foreach (var invalid in new[] { "A2|4321|1|2|609|673|1920|1009|1|317|393|585",
+                "A2|4321|1|2|609|673|1920|1009|1|317|393|585|560|1", "A1|4321|1|2|609|673|1920|1009|1|317|393|585|560",
+                "A2|4321|1|2|609|673|1920|1009|1|317|393|0|560", "A2|4321|1|2|609|673|1920|1009|1|317|393|1605|560",
+                "A2|4321|1|2|609|673|1920|1009|1|317|393|585|617", "A2|4321|1|2|10|673|1920|1009|1|317|393|585|560",
+                "A2|4321|1|2|609|673|1920|1009|1|-1|393|585|560", "A3|4321|1|2|609|673|1920|1009|1|317|393|585|560" })
+            {
+                OutputAnchor rejected;
+                Need(!OutputAnchor.TryParse(invalid, out rejected) && rejected == null, "malformed confirmed anchor rejected: " + invalid);
+            }
+            Need(Sanitize(confirmedText) == confirmedText, "confirmed anchor survives the OB1 detail character set");
         }
 
         private static void DetailSelfTest()
@@ -491,6 +637,24 @@ namespace RemoteMonitorSlave
             Need(Result("AUTO_COPY_BODY_UNCONFIRMED", null).Detail == "NONE" &&
                 Result("auto_copy", null).Code == "AUTO_COPY_FAILED" &&
                 Result("AUTO_COPY_BODY_UNCONFIRMED", "b2|1").Detail == "NONE", "failure results stay inside the wire contract");
+
+            // Occluding process names: folded into the narrower log/wire character set, our own windows become SELF.
+            Need(SafeName("RemoteMonitorSlave") == "REMOTEMONITORSLAVE" && SafeName("power-si.v2") == "POWER_SI_V2" &&
+                SafeName("") == "NONE" && SafeName(null) == "NONE" && SafeName("한글") == "NONE" &&
+                SafeName(new string('x', 200)).Length == 64, "occluding process name folding");
+            foreach (var name in new[] { "SELF", "NONE", "EXPLORER", SafeName("PowerSI-64.exe") })
+                Need(Result("AUTO_COPY_OCCLUDED", "OCCLUDER|" + name).Detail == "OCCLUDER|" + name,
+                    "occluder detail stays on the wire: " + name);
+
+            // The worker capture rides beside the result object, never inside OutputBufferResult itself.
+            var aborted = new OutputBufferResult { Code = "AUTO_COPY_BODY_MOVED", Method = "NONE", Detail = "NONE" };
+            Need(FrameOf(aborted) == null && FrameOf(null) == null, "no worker frame by default");
+            AttachFrame(aborted, new byte[] { 1, 2, 3 });
+            AttachFrame(aborted, null);
+            var kept = FrameOf(aborted);
+            Need(kept != null && kept.Length == 3, "the worker frame stays attached to its own result");
+            AttachFrame(aborted, new byte[] { 4, 5 });
+            Need(FrameOf(aborted).Length == 2, "a second attach replaces the frame instead of throwing");
         }
 
         private static void LayoutSelfTest()

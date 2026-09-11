@@ -47,7 +47,7 @@ namespace RemoteMonitorMaster
             legacyMarker.AccessibleName = "기존 M코드 연속 운용 선택 (기본은 명령어 통합 확인)";
             localPhone.SetBounds(633, 182, 229, 36);
             result.SetBounds(18, 232, 844, 142);
-            result.Text = "v0.1.49: 현재 현장 시험은 Slave의 동일 화면 모델 비교입니다. Master·메신저 재시험은 제외합니다.\r\n" +
+            result.Text = "v0.1.50: 현재 현장 시험은 Slave의 동일 화면 모델 비교입니다. Master·메신저 재시험은 제외합니다.\r\n" +
                 "아래는 메신저로 상태를 조회할 때의 안내입니다. 이번 진단에서는 반복하지 않습니다.\r\n" +
                 "pwrsi 그대로 입력하세요. total status는 단어 사이 한 칸입니다. 앞뒤 공백은 자동 제거합니다. 기존 M코드는 체크 시에만 사용합니다.\r\n" +
                 "직접 상태 조회는 연결 문제를 분리할 때만 선택합니다. 연속 운용 전에 실행할 필요가 없습니다.\r\n" +

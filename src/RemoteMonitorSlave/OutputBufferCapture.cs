@@ -131,21 +131,41 @@ namespace RemoteMonitorSlave
         private static string Serialize(OutputBufferResult result)
         {
             Validate(result);
-            return string.Join("\t", "OB1", result.Code, result.Method, result.Detail,
+            var wire = string.Join("\t", "OB1", result.Code, result.Method, result.Detail,
                 result.Text == null ? "-" : Convert.ToBase64String(Encoding.GetBytes(result.Text)));
+            // Optional 6th field: only the auto-copy verb fills it, and only when it failed after its own capture.
+            var frame = OutputAutoCopy.FrameOf(result);
+            if (frame == null) return wire;
+            if (frame.Length > OutputAutoCopy.MaxFramePng) throw new InvalidDataException("BUFFER_RESULT_INVALID");
+            return wire + "\t" + Convert.ToBase64String(frame);
         }
         private static OutputBufferResult Parse(string wire)
         {
             if (wire == null || wire.Length > MaxWire) throw new InvalidDataException("BUFFER_SIZE");
             var parts = wire.Split('\t');
-            if (parts.Length != 5 || parts[0] != "OB1") throw new InvalidDataException("BUFFER_RESULT_INVALID");
+            if ((parts.Length != 5 && parts.Length != 6) || parts[0] != "OB1") throw new InvalidDataException("BUFFER_RESULT_INVALID");
             var bytes = parts[4] == "-" ? new byte[0] : Convert.FromBase64String(parts[4]);
             if (bytes.Length > MaxCharacters * 2 || (parts[4] != "-" && Convert.ToBase64String(bytes) != parts[4])) throw new InvalidDataException("BUFFER_SIZE");
             var result = new OutputBufferResult { Code = parts[1], Method = parts[2], Detail = parts[3], Text = parts[4] == "-" ? null : Encoding.GetString(bytes) };
             Validate(result);
             result.CharacterCount = result.Text?.Length ?? 0;
             result.LineCount = CountLines(result.Text);
+            if (parts.Length == 6) OutputAutoCopy.AttachFrame(result, ParseFrame(parts[5]));
             return result;
+        }
+        // The worker frame is an image, never text: only its size and PNG signature are accepted here.
+        private static byte[] ParseFrame(string field)
+        {
+            if (field == null || field.Length < 4 || field.Length > (OutputAutoCopy.MaxFramePng + 2) / 3 * 4 + 4)
+                throw new InvalidDataException("BUFFER_SIZE");
+            byte[] png;
+            try { png = Convert.FromBase64String(field); }
+            catch (FormatException) { throw new InvalidDataException("BUFFER_RESULT_INVALID"); }
+            if (png.Length < 8 || png.Length > OutputAutoCopy.MaxFramePng ||
+                png[0] != 137 || png[1] != 80 || png[2] != 78 || png[3] != 71 ||
+                png[4] != 13 || png[5] != 10 || png[6] != 26 || png[7] != 10)
+                throw new InvalidDataException("BUFFER_RESULT_INVALID");
+            return png;
         }
         internal static int CountLines(string text)
         {
@@ -240,8 +260,30 @@ namespace RemoteMonitorSlave
                 throw new InvalidOperationException("Missing anchor became an anchor.");
             var automatic = Parse(Serialize(new OutputBufferResult { Code = "AUTO_COPY_READ", Method = "AUTO_CLIPBOARD",
                 Detail = "A2|320|385|20|40|360|320|1000|900|B2|1920|1040|12|1|3|4|1|2|1", Text = "sentinel" }));
-            if (automatic.Code != "AUTO_COPY_READ" || automatic.Method != "AUTO_CLIPBOARD" || automatic.Text != "sentinel")
+            if (automatic.Code != "AUTO_COPY_READ" || automatic.Method != "AUTO_CLIPBOARD" || automatic.Text != "sentinel" ||
+                Serialize(automatic).Split('\t').Length != 5 || OutputAutoCopy.FrameOf(automatic) != null)
                 throw new InvalidOperationException("Auto copy result did not survive the OB1 wire.");
+            // A failed auto copy carries its own capture back in the optional 6th field.
+            var framePng = Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aLe8AAAAASUVORK5CYII=");
+            var aborted = new OutputBufferResult { Code = "AUTO_COPY_BODY_MOVED", Method = "NONE",
+                Detail = "B2|1920|1009|12|1|3|4|1|2|1" };
+            OutputAutoCopy.AttachFrame(aborted, framePng);
+            if (Serialize(aborted).Split('\t').Length != 6)
+                throw new InvalidOperationException("Auto copy frame did not reach the OB1 wire.");
+            var returned = Parse(Serialize(aborted));
+            var carried = OutputAutoCopy.FrameOf(returned);
+            if (returned.Code != "AUTO_COPY_BODY_MOVED" || returned.Text != null || carried == null ||
+                !carried.SequenceEqual(framePng) || LogMetadata(returned).Contains("iVBOR"))
+                throw new InvalidOperationException("Auto copy frame lost or leaked on the OB1 wire.");
+            foreach (var broken in new[] { "not base64", "AAAA", Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }) })
+            {
+                var rejected = false;
+                try { Parse(Serialize(automatic) + "\t" + broken); }
+                catch (InvalidDataException) { rejected = true; }
+                catch (FormatException) { rejected = true; }
+                if (!rejected) throw new InvalidOperationException("A non-PNG 6th OB1 field was accepted.");
+            }
             result.Text = new string('x', MaxCharacters + 1);
             var oversize = false;
             try { Serialize(result); } catch (InvalidDataException) { oversize = true; }
