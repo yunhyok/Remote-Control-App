@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Automation;
 
@@ -12,6 +13,12 @@ namespace RemoteMonitorMaster
 {
     internal sealed class AutomationTarget
     {
+        private static readonly Regex MetadataCamelBoundary = new Regex(
+            @"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex ExcludedMessageMetadata = new Regex(
+            @"(?:\A|[^A-Za-z0-9])(?:file|attach|download)|파일|첨부",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private readonly IntPtr window;
         private readonly ProcessIdentity process;
         private readonly AutomationElement originalRoot;
@@ -52,6 +59,7 @@ namespace RemoteMonitorMaster
 
         public static AutomationTarget Bind(IntPtr window, AuditLog log)
         {
+            AppInfo.RejectAutomationInDiagnosticBuild();
             RequireMta();
             if (window == IntPtr.Zero || !NativeMethods.IsWindow(window))
             {
@@ -59,13 +67,73 @@ namespace RemoteMonitorMaster
             }
 
             var process = ProcessIdentity.Capture(window);
-            var root = AutomationElement.FromHandle(window);
-            if (root == null || root.Current.ControlType != ControlType.Window)
+            process.Log(log);
+            AutomationElement root;
+            ControlType rootType;
+            try
             {
-                throw new MonitorException("UNSUPPORTED_HEADER", "The foreground handle is not exposed as a UIA Window.");
+                root = AutomationElement.FromHandle(window);
+                rootType = root == null ? null : root.Current.ControlType;
+                log.Write("INFO", "UIA_ROOT_PROBE",
+                    AuditLog.Field("root_available", root != null),
+                    AuditLog.Field("expected_pid", process.ProcessId),
+                    AuditLog.Field("captured_hwnd", FormatHandle(window)),
+                    AuditLog.Field("control_type", rootType == null ? "<none>" : rootType.ProgrammaticName));
+            }
+            catch (Exception ex)
+            {
+                throw new MonitorException("UNSUPPORTED_UIA_ROOT_READ_FAILED",
+                    "UIA root: <read/audit failed>" + Environment.NewLine + process.Summary + Environment.NewLine +
+                    "No input or send was attempted.", ex);
+            }
+
+            if (root != null)
+            {
+                try
+                {
+                    log.Write("INFO", "UIA_ROOT_PROVIDER_DETAILS",
+                        AuditLog.Field("process_id", root.Current.ProcessId),
+                        AuditLog.Field("native_hwnd", FormatHandle(new IntPtr(root.Current.NativeWindowHandle))),
+                        AuditLog.Field("framework_id_fingerprint", log.Fingerprint(root.Current.FrameworkId)));
+                }
+                catch (Exception ex)
+                {
+                    // Preserve the root/type evidence even when optional provider details are unavailable.
+                    log.WriteException("UIA_ROOT_PROVIDER_PROBE_FAILED", ex);
+                }
+            }
+
+            var rootRejection = RootRejectionReason(root != null, rootType);
+            if (rootRejection != null)
+            {
+                if (root != null)
+                {
+                    try
+                    {
+                        ElementIdentity.Capture(root).Log(log, "unsupported_window_root");
+                    }
+                    catch (Exception ex)
+                    {
+                        log.WriteException("UIA_ROOT_IDENTITY_PROBE_FAILED", ex);
+                    }
+
+                    try
+                    {
+                        LogTreeSnapshot(root.FindAll(TreeScope.Descendants, Condition.TrueCondition), log);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.WriteException("UIA_ROOT_TREE_PROBE_FAILED", ex);
+                    }
+                }
+
+                throw new MonitorException(rootRejection,
+                    "UIA root: " + (rootType == null ? "<none>" : rootType.ProgrammaticName) + Environment.NewLine + process.Summary + Environment.NewLine +
+                    "Bind is blocked; no input or send was attempted. Use Open Log Folder to collect the diagnostic log.");
             }
 
             var rootIdentity = ElementIdentity.Capture(root);
+            rootIdentity.Log(log, "window_root");
             if (rootIdentity.NameLength == 0)
             {
                 throw new MonitorException("UNSUPPORTED_WINDOW_NAME_EMPTY", "The foreground UIA Window has no stable Name.");
@@ -97,8 +165,6 @@ namespace RemoteMonitorMaster
                 ElementIdentity.Capture(live.Send));
 
             target.Validate(log, "BIND_FINAL");
-            process.Log(log);
-            rootIdentity.Log(log, "window_root");
             target.chatContainer.Log(log, "chat_container");
             target.composer.Log(log, "composer");
             header.Log(log, "chat_header");
@@ -109,15 +175,27 @@ namespace RemoteMonitorMaster
             return target;
         }
 
-        public IList<string> ReadPingTokens(AuditLog log, string phase)
+        internal static string RootRejectionReason(bool rootAvailable, ControlType rootType)
+        {
+            if (!rootAvailable)
+            {
+                return "UNSUPPORTED_UIA_ROOT_MISSING";
+            }
+
+            return rootType == ControlType.Window ? null : "UNSUPPORTED_UIA_ROOT_TYPE";
+        }
+
+        public IList<string> ReadPingTokens(AuditLog log, string phase, bool includeOffscreen = false)
         {
             var live = Validate(log, phase + "_PRE_READ");
             log.Write("INFO", "READ_BEGIN", AuditLog.Field("phase", phase));
 
             try
             {
-                var messages = StructuredMessages(live.Transcript, process.ProcessId);
-                if (messages.Count == 0)
+                int exposedMessageCount;
+                int offscreenMessageCount;
+                var messages = StructuredMessages(live.Transcript, process.ProcessId, includeOffscreen, out exposedMessageCount, out offscreenMessageCount);
+                if (exposedMessageCount == 0)
                 {
                     throw new MonitorException(
                         "UNSUPPORTED_MESSAGE_STRUCTURE",
@@ -125,6 +203,8 @@ namespace RemoteMonitorMaster
                 }
 
                 var tokens = new List<string>();
+                var terminalNewlineCount = 0;
+                var longMessageCount = 0;
                 foreach (var message in messages)
                 {
                     object patternObject;
@@ -134,9 +214,13 @@ namespace RemoteMonitorMaster
                     }
 
                     var text = ((TextPattern)patternObject).DocumentRange.GetText(513) ?? string.Empty;
+                    if (text.EndsWith("\r", StringComparison.Ordinal) || text.EndsWith("\n", StringComparison.Ordinal))
+                    {
+                        terminalNewlineCount++;
+                    }
                     if (text.Length > 512)
                     {
-                        log.Write("INFO", "NON_COMMAND_MESSAGE_SKIPPED", AuditLog.Field("reason", "MESSAGE_TOO_LONG"));
+                        longMessageCount++;
                         continue;
                     }
 
@@ -149,7 +233,12 @@ namespace RemoteMonitorMaster
 
                 log.Write("INFO", "READ_OK",
                     AuditLog.Field("phase", phase),
+                    AuditLog.Field("exposed_message_elements", exposedMessageCount),
+                    AuditLog.Field("offscreen_message_elements", offscreenMessageCount),
                     AuditLog.Field("message_elements", messages.Count),
+                    AuditLog.Field("include_offscreen", includeOffscreen),
+                    AuditLog.Field("terminal_newline_messages", terminalNewlineCount),
+                    AuditLog.Field("long_messages_skipped", longMessageCount),
                     AuditLog.Field("ping_candidates", tokens.Count));
                 return tokens;
             }
@@ -165,6 +254,7 @@ namespace RemoteMonitorMaster
 
         public void SendPong(AuditLog log, string token, Func<bool> stopRequested)
         {
+            AppInfo.RejectAutomationInDiagnosticBuild();
             var response = Protocol.Pong(token);
             var valueMayBePresent = false;
 
@@ -408,12 +498,12 @@ namespace RemoteMonitorMaster
 
                 var live = Discover(root, process.ProcessId, log, phase, false);
                 EnsureElements(live, process.ProcessId);
-                if (!chatContainer.Equals(ElementIdentity.Capture(live.ChatContainer)))
+                if (!chatContainer.Matches(ElementIdentity.Capture(live.ChatContainer), compareName: false))
                 {
                     throw new MonitorException("TARGET_CHAT_CONTAINER_CHANGED", "The semantic chat container UIA element changed.");
                 }
 
-                if (!composer.Equals(ElementIdentity.Capture(live.Composer)))
+                if (!composer.Matches(ElementIdentity.Capture(live.Composer), compareName: false))
                 {
                     throw new MonitorException("TARGET_COMPOSER_CHANGED", "The input/send composer UIA element changed.");
                 }
@@ -423,12 +513,12 @@ namespace RemoteMonitorMaster
                     throw new MonitorException("TARGET_HEADER_CHANGED", "The unique chat header/container UIA element changed.");
                 }
 
-                if (!transcript.Equals(ElementIdentity.Capture(live.Transcript)))
+                if (!transcript.Matches(ElementIdentity.Capture(live.Transcript), compareName: false))
                 {
                     throw new MonitorException("TARGET_TRANSCRIPT_CHANGED", "The unique transcript UIA element changed.");
                 }
 
-                if (!input.Equals(ElementIdentity.Capture(live.Input)))
+                if (!input.Matches(ElementIdentity.Capture(live.Input), compareName: false))
                 {
                     throw new MonitorException("TARGET_INPUT_CHANGED", "The unique input UIA element changed.");
                 }
@@ -477,6 +567,11 @@ namespace RemoteMonitorMaster
                 throw new MonitorException("UNSUPPORTED_UIA_TREE", "The foreground window did not expose a readable UIA tree.", ex);
             }
 
+            if (logDetails)
+            {
+                LogTreeSnapshot(all, log);
+            }
+
             var inputs = new List<AutomationElement>();
             var sends = new List<AutomationElement>();
             var invokeButtons = new List<AutomationElement>();
@@ -511,7 +606,9 @@ namespace RemoteMonitorMaster
                 if ((type == ControlType.List || type == ControlType.Document) && !element.Current.IsOffscreen)
                 {
                     transcriptSurfaces.Add(element);
-                    if (StructuredMessages(element, expectedProcessId).Count > 0)
+                    int exposedMessageCount;
+                    int offscreenMessageCount;
+                    if (StructuredMessages(element, expectedProcessId, true, out exposedMessageCount, out offscreenMessageCount).Count > 0)
                     {
                         transcripts.Add(element);
                     }
@@ -542,8 +639,40 @@ namespace RemoteMonitorMaster
             return new LiveElements(chatContainer, composer, header, transcript, input, send);
         }
 
-        private static IList<AutomationElement> StructuredMessages(AutomationElement transcript, int expectedProcessId)
+        private static void LogTreeSnapshot(AutomationElementCollection all, AuditLog log)
         {
+            // ponytail: cap the read-only diagnostic snapshot; raise only if a real failed Bind needs more evidence.
+            log.Write("INFO", "UIA_TREE_SNAPSHOT", AuditLog.Field("total_nodes", all.Count),
+                AuditLog.Field("limit", 200), AuditLog.Field("truncated", all.Count > 200));
+            foreach (AutomationElement element in all.Cast<AutomationElement>().Take(200))
+            {
+                try
+                {
+                    var parent = TreeWalker.RawViewWalker.GetParent(element);
+                    var identity = ElementIdentity.Capture(element);
+                    identity.Log(log, "tree_node");
+                    log.Write("INFO", "UIA_TREE_NODE",
+                        AuditLog.Field("runtime_id", identity.RuntimeId),
+                        AuditLog.Field("parent_runtime_id", parent == null ? "" : RuntimeKey(parent)),
+                        AuditLog.Field("enabled", element.Current.IsEnabled),
+                        AuditLog.Field("offscreen", element.Current.IsOffscreen),
+                        AuditLog.Field("input_semantic", IsInputSemantic(element)),
+                        AuditLog.Field("transcript_semantic", IsTranscriptSemantic(element)),
+                        AuditLog.Field("chat_container_semantic", IsChatContainerSemantic(element)),
+                        AuditLog.Field("composer_semantic", IsComposerSemantic(element)),
+                        AuditLog.Field("text_envelope_semantic", IsTextMessageEnvelope(element)));
+                }
+                catch (Exception ex)
+                {
+                    log.WriteException("UIA_TREE_NODE_UNAVAILABLE", ex);
+                }
+            }
+        }
+
+        private static IList<AutomationElement> StructuredMessages(AutomationElement transcript, int expectedProcessId, bool includeOffscreen, out int exposedMessageCount, out int offscreenMessageCount)
+        {
+            exposedMessageCount = 0;
+            offscreenMessageCount = 0;
             var result = new List<AutomationElement>();
             var leavesByEnvelope = new Dictionary<string, List<AutomationElement>>(StringComparer.Ordinal);
             var envelopes = new Dictionary<string, AutomationElement>(StringComparer.Ordinal);
@@ -553,8 +682,6 @@ namespace RemoteMonitorMaster
                 var type = element.Current.ControlType;
                 object pattern;
                 if ((type != ControlType.Text && type != ControlType.Document) ||
-                    element.Current.ProcessId != expectedProcessId ||
-                    element.Current.IsOffscreen ||
                     !element.TryGetCurrentPattern(TextPattern.Pattern, out pattern) ||
                     HasTextPatternDescendant(element))
                 {
@@ -564,7 +691,6 @@ namespace RemoteMonitorMaster
                 var envelope = FindMessageEnvelope(element, transcript);
                 if (envelope == null ||
                     envelope.Current.ProcessId != expectedProcessId ||
-                    envelope.Current.IsOffscreen ||
                     !IsTextMessageEnvelope(envelope))
                 {
                     continue;
@@ -585,13 +711,31 @@ namespace RemoteMonitorMaster
             foreach (var pair in leavesByEnvelope)
             {
                 var envelope = envelopes[pair.Key];
-                if (pair.Value.Count == 1 && !HasFileOrActionContent(envelope))
+                // Count hidden/foreign bodies too: hiding a second body must not make an ambiguous envelope eligible.
+                var body = pair.Value[0];
+                if (pair.Value.Count == 1 &&
+                    body.Current.ProcessId == expectedProcessId && !HasFileOrActionContent(envelope))
                 {
-                    result.Add(pair.Value[0]);
+                    exposedMessageCount++;
+                    var visible = !body.Current.IsOffscreen && !envelope.Current.IsOffscreen;
+                    if (!visible)
+                    {
+                        offscreenMessageCount++;
+                    }
+
+                    if (IsMessageEligible(pair.Value.Count, visible, includeOffscreen))
+                    {
+                        result.Add(body);
+                    }
                 }
             }
 
             return result;
+        }
+
+        internal static bool IsMessageEligible(int bodyCount, bool visible, bool includeOffscreen)
+        {
+            return bodyCount == 1 && (visible || includeOffscreen);
         }
 
         private static bool HasTextPatternDescendant(AutomationElement element)
@@ -630,7 +774,7 @@ namespace RemoteMonitorMaster
 
         private static bool IsTextMessageEnvelope(AutomationElement envelope)
         {
-            if (ContainsMetadataSemantic(envelope, "file", "attach", "download", "파일", "첨부"))
+            if (MatchesExcludedMessageMetadata(envelope.Current.AutomationId, envelope.Current.ClassName))
             {
                 return false;
             }
@@ -662,6 +806,7 @@ namespace RemoteMonitorMaster
             {
                 var type = element.Current.ControlType;
                 if (type == ControlType.Image || type == ControlType.Hyperlink || type == ControlType.Button ||
+                    MatchesExcludedMessageMetadata(element.Current.AutomationId, element.Current.ClassName) ||
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out ignored))
                 {
                     return true;
@@ -884,6 +1029,12 @@ namespace RemoteMonitorMaster
                 className,
                 "messageinput", "chatinput", "compose", "composer", "messageentry", "chatentry",
                 "txtmessage", "editmessage", "메시지입력", "대화입력");
+        }
+
+        internal static bool MatchesExcludedMessageMetadata(string automationId, string className)
+        {
+            var metadata = (automationId ?? string.Empty) + " " + (className ?? string.Empty);
+            return ExcludedMessageMetadata.IsMatch(MetadataCamelBoundary.Replace(metadata, " "));
         }
 
         private static bool IsTranscriptSemantic(AutomationElement element)
@@ -1205,7 +1356,7 @@ namespace RemoteMonitorMaster
         public readonly string NameHash;
         public readonly string SafeName;
 
-        private ElementIdentity(
+        internal ElementIdentity(
             string runtimeId,
             int processId,
             string automationId,
@@ -1275,16 +1426,21 @@ namespace RemoteMonitorMaster
 
         public bool Equals(ElementIdentity other)
         {
+            return Matches(other, compareName: true);
+        }
+
+        internal bool Matches(ElementIdentity other, bool compareName)
+        {
+            // Content-bearing controls may expose their changing contents as Name; the conversation header stays strict.
             return other != null &&
                 ProcessId == other.ProcessId &&
-                NameLength == other.NameLength &&
                 string.Equals(RuntimeId, other.RuntimeId, StringComparison.Ordinal) &&
                 string.Equals(AutomationId, other.AutomationId, StringComparison.Ordinal) &&
                 string.Equals(ControlType, other.ControlType, StringComparison.Ordinal) &&
                 string.Equals(ClassName, other.ClassName, StringComparison.Ordinal) &&
                 string.Equals(FrameworkId, other.FrameworkId, StringComparison.Ordinal) &&
                 string.Equals(Patterns, other.Patterns, StringComparison.Ordinal) &&
-                string.Equals(NameHash, other.NameHash, StringComparison.Ordinal);
+                (!compareName || (NameLength == other.NameLength && string.Equals(NameHash, other.NameHash, StringComparison.Ordinal)));
         }
 
         public override bool Equals(object obj)

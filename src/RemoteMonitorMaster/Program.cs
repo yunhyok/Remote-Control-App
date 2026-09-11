@@ -9,6 +9,8 @@ namespace RemoteMonitorMaster
         [STAThread]
         private static void Main(string[] args)
         {
+            if (RemoteMonitorLink.PowerSiScreenCapture.TryRunWorker(args)) return;
+            if (RemoteMonitorLink.PowerSiObservation.TryRunWorker(args)) return;
             if (args.Length == 1 && string.Equals(args[0], "--self-test", StringComparison.Ordinal))
             {
                 Environment.ExitCode = CoreSelfTest.Run();
@@ -49,13 +51,29 @@ namespace RemoteMonitorMaster
                     try
                     {
                         log.Write("INFO", "APP_START",
+                            AuditLog.Field("read_only", false),
+                            AuditLog.Field("supervised_send_test", false),
+                            AuditLog.Field("supervised_roundtrip", true),
+                            AuditLog.Field("operating_status_available", true),
+                            AuditLog.Field("plain_readonly_commands_available", true),
+                            AuditLog.Field("pc_status", true),
+                            AuditLog.Field("pc_status_read_only", true),
+                            AuditLog.Field("slave_client_available", true),
+                            AuditLog.Field("per_request_maximum_replies", 1),
+                            AuditLog.Field("repeated_requests_require_local_approval", true),
+                            AuditLog.Field("receive_diagnostic", true),
+                            AuditLog.Field("send_method", "TIMED_MOUSE_CLICK"),
+                            AuditLog.Field("entry_method", "UIA_SETVALUE"),
+                            AuditLog.Field("automatic_send_allowed", false),
                             AuditLog.Field("os", Environment.OSVersion.VersionString),
                             AuditLog.Field("clr", Environment.Version),
                             AuditLog.Field("framework_release", SystemInfo.FrameworkRelease),
                             AuditLog.Field("process_64bit", Environment.Is64BitProcess),
                             AuditLog.Field("os_64bit", Environment.Is64BitOperatingSystem));
-                        Application.Run(new MainForm(log));
-                        log.Write("INFO", "APP_EXIT");
+                        Application.Run(new MasterHubForm(log));
+                        // An attachment reader may deny writes after the completed log was released.
+                        try { log.Write("INFO", "APP_EXIT"); }
+                        catch (System.IO.IOException) { } // Optional shutdown entry; do not report a false application failure.
                     }
                     catch (Exception ex)
                     {

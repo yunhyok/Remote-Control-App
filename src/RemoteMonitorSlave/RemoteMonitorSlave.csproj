@@ -7,31 +7,25 @@
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <AssemblyName>RemoteMonitorMaster</AssemblyName>
-    <RootNamespace>RemoteMonitorMaster</RootNamespace>
+    <AssemblyName>RemoteMonitorSlave</AssemblyName>
+    <RootNamespace>RemoteMonitorSlave</RootNamespace>
     <Version>0.1.48</Version>
     <AssemblyVersion>0.1.48.0</AssemblyVersion>
     <FileVersion>0.1.48.0</FileVersion>
     <InformationalVersion>0.1.48</InformationalVersion>
-    <Company>Remote Monitor Master</Company>
-    <Product>Remote Monitor Master</Product>
-    <AssemblyTitle>Remote Monitor Master</AssemblyTitle>
-    <Description>Pinned Slave status client and continuous request-bound KI-Messenger status bridge</Description>
+    <Product>Remote Monitor Slave</Product>
+    <AssemblyTitle>Remote Monitor Slave</AssemblyTitle>
+    <Description>Read-only paired PC status endpoint</Description>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
-
   <ItemGroup>
     <Compile Include="..\RemoteMonitorLink\*.cs" Link="Link\%(Filename)%(Extension)" />
     <Reference Include="System.Security" />
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web.Extensions" />
-    <Reference Include="Accessibility" />
     <Reference Include="UIAutomationClient" />
     <Reference Include="UIAutomationTypes" />
     <Reference Include="WindowsBase" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
   </ItemGroup>
 </Project>

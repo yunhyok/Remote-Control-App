@@ -9,3 +9,9 @@ diagnostics/
 *.user
 *.suo
 seen-tokens.txt
+roundtrip-seen-tokens.txt
+*.rmpair
+identity.dat
+local-vision.json
+*.pfx
+*.p12
