@@ -24,24 +24,30 @@ namespace RemoteMonitorSlave
 
         internal static bool TryRunWorker(string[] args)
         {
-            if (args.Length == 0 || (args[0] != Argument && args[0] != CopyArgument)) return false;
+            if (args.Length == 0 || (args[0] != Argument && args[0] != CopyArgument && args[0] != OutputAutoCopy.WorkerArgument)) return false;
             OutputBufferResult result;
             try
             {
-                var targetArgs = args[0] == CopyArgument ? args.Take(3).ToArray() : args;
-                var root = PowerSiScreenCapture.ResolveWindow(targetArgs);
-                if (args[0] == CopyArgument)
+                // The auto-copy verb owns its own window resolution, live re-checks and failure codes.
+                if (args[0] == OutputAutoCopy.WorkerArgument) result = OutputAutoCopy.RunWorker(args);
+                else
                 {
-                    uint baseline;
-                    if (args.Length != 4 || !uint.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out baseline))
-                        throw new InvalidDataException("SC_IDENTITY");
-                    var inventory = new ProcessInventory { SessionId = int.Parse(args[1], CultureInfo.InvariantCulture),
-                        Items = args[2].Split(',').Select(p => p.Split(':')).Select(p => new ProcessState {
-                            Pid = int.Parse(p[0], CultureInfo.InvariantCulture), StartUtcTicks = long.Parse(p[1], CultureInfo.InvariantCulture) }).ToArray() };
-                    if (!TryReadUserCopy(inventory, baseline, out result)) result = Failed("COPY_PENDING");
+                    var targetArgs = args[0] == CopyArgument ? args.Take(3).ToArray() : args;
+                    var root = PowerSiScreenCapture.ResolveWindow(targetArgs);
+                    if (args[0] == CopyArgument)
+                    {
+                        uint baseline;
+                        if (args.Length != 4 || !uint.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out baseline))
+                            throw new InvalidDataException("SC_IDENTITY");
+                        var inventory = ParseInventory(args[1], args[2]);
+                        if (!TryReadUserCopy(inventory, baseline, out result)) result = Failed("COPY_PENDING");
+                        // Read-only sampling of where the user clicked before copying; a hint for the auto-copy verb only.
+                        else if (result != null && result.Code == "USER_COPY_READ" && result.Detail == "SOURCE_PID_MATCH")
+                            result.Detail = "SOURCE_PID_MATCH|" + OutputAutoCopy.LearnAnchor(root, inventory);
+                    }
+                    else result = PowerSiOutputBuffer.Read(root);
+                    if (PowerSiScreenCapture.ResolveWindow(targetArgs) != root) throw new InvalidDataException("SC_WINDOW_CHANGED");
                 }
-                else result = PowerSiOutputBuffer.Read(root);
-                if (PowerSiScreenCapture.ResolveWindow(targetArgs) != root) throw new InvalidDataException("SC_WINDOW_CHANGED");
             }
             catch (InvalidDataException ex) { result = Failed(SafeCode(ex.Message) ? ex.Message : "BUFFER_FAILED"); }
             catch { result = Failed("BUFFER_FAILED"); }
@@ -58,9 +64,18 @@ namespace RemoteMonitorSlave
                 return Failed("SC_IDENTITY");
             var identities = string.Join(",", inventory.Items.Select(p => p.Pid.ToString(CultureInfo.InvariantCulture) + ":" +
                 p.StartUtcTicks.Value.ToString(CultureInfo.InvariantCulture)));
-            using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
-                (copyBaseline.HasValue ? CopyArgument : Argument) + " " + inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities +
-                    (copyBaseline.HasValue ? " " + copyBaseline.Value.ToString(CultureInfo.InvariantCulture) : ""))
+            var arguments = (copyBaseline.HasValue ? CopyArgument : Argument) + " " +
+                inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities +
+                (copyBaseline.HasValue ? " " + copyBaseline.Value.ToString(CultureInfo.InvariantCulture) : "");
+            return await RunWorkerAsync(arguments, copyBaseline.HasValue ? 3000 : 10000, "BUFFER_TIMEOUT",
+                "BUFFER_WORKER_FAILED", cancellation).ConfigureAwait(false);
+        }
+
+        // Shared single-use worker host for every OB1 verb. Only this helper process is ever terminated.
+        internal static async Task<OutputBufferResult> RunWorkerAsync(string arguments, int timeoutMilliseconds,
+            string timeoutCode, string failureCode, CancellationToken cancellation)
+        {
+            using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, arguments)
                 { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true } })
             {
                 try
@@ -73,16 +88,24 @@ namespace RemoteMonitorSlave
                     {
                         cancellation.ThrowIfCancellationRequested();
                         if (reading.IsFaulted) await reading.ConfigureAwait(false);
-                        if (clock.ElapsedMilliseconds >= (copyBaseline.HasValue ? 3000 : 10000)) return Failed("BUFFER_TIMEOUT");
+                        if (clock.ElapsedMilliseconds >= timeoutMilliseconds) return Failed(timeoutCode);
                         await Task.Delay(25, cancellation).ConfigureAwait(false);
                     }
                     cancellation.ThrowIfCancellationRequested();
-                    return worker.ExitCode == 0 ? Parse(await reading.ConfigureAwait(false)) : Failed("BUFFER_WORKER_FAILED");
+                    return worker.ExitCode == 0 ? Parse(await reading.ConfigureAwait(false)) : Failed(failureCode);
                 }
                 catch (OperationCanceledException) { throw; }
-                catch { return Failed("BUFFER_WORKER_FAILED"); }
+                catch { return Failed(failureCode); }
                 finally { try { if (!worker.HasExited) { worker.Kill(); worker.WaitForExit(200); } } catch { } }
             }
+        }
+
+        // Worker-side identity arguments. ResolveWindow has already validated and matched every PID/start time.
+        internal static ProcessInventory ParseInventory(string session, string items)
+        {
+            return new ProcessInventory { SessionId = int.Parse(session, CultureInfo.InvariantCulture),
+                Items = items.Split(',').Select(p => p.Split(':')).Select(p => new ProcessState {
+                    Pid = int.Parse(p[0], CultureInfo.InvariantCulture), StartUtcTicks = long.Parse(p[1], CultureInfo.InvariantCulture) }).ToArray() };
         }
 
         private static async Task<string> ReadBounded(StreamReader reader)
@@ -98,7 +121,7 @@ namespace RemoteMonitorSlave
         }
 
         private static OutputBufferResult Failed(string code) { return new OutputBufferResult { Code = code, Method = "NONE", Detail = "NONE" }; }
-        private static bool SafeCode(string text) { return text != null && Regex.IsMatch(text, @"\A[A-Z0-9_]{1,64}\z"); }
+        internal static bool SafeCode(string text) { return text != null && Regex.IsMatch(text, @"\A[A-Z0-9_]{1,64}\z"); }
         private static void Validate(OutputBufferResult result)
         {
             if (result == null || !SafeCode(result.Code) || !SafeCode(result.Method) || result.Detail == null ||
@@ -203,9 +226,27 @@ namespace RemoteMonitorSlave
             if (copy.Text != result.Text || copy.LineCount != 4 || copy.CharacterCount != result.Text.Length ||
                 LogMetadata(copy).Contains("private") || LogMetadata(copy).Contains("860.000"))
                 throw new InvalidOperationException("Buffer pipe preservation/privacy failed.");
+            var anchor = new OutputAnchor { Pid = 4321, StartUtcTicks = 638000000000000000L, SessionId = 1,
+                ClientPoint = new System.Drawing.Point(320, 385), ClientSize = new System.Drawing.Size(1920, 1040),
+                LearnedUtc = new DateTime(2026, 9, 11, 1, 2, 3, DateTimeKind.Utc) };
+            var learned = Parse(Serialize(new OutputBufferResult { Code = "USER_COPY_READ", Method = "USER_CLIPBOARD",
+                Detail = "SOURCE_PID_MATCH|" + anchor.Serialize(), Text = "private-buffer-sentinel" }));
+            if (learned.Detail.Split('|')[0] != "SOURCE_PID_MATCH" || !anchor.Matches(OutputAutoCopy.AnchorOf(learned)) ||
+                LogMetadata(learned).Contains("private"))
+                throw new InvalidOperationException("Learned anchor lost or unsafe on the OB1 wire.");
+            var none = Parse(Serialize(new OutputBufferResult { Code = "USER_COPY_READ", Method = "USER_CLIPBOARD",
+                Detail = "SOURCE_PID_MATCH|ANCHOR_NONE|FOREGROUND" }));
+            if (none.Detail.Split('|')[0] != "SOURCE_PID_MATCH" || OutputAutoCopy.AnchorOf(none) != null)
+                throw new InvalidOperationException("Missing anchor became an anchor.");
+            var automatic = Parse(Serialize(new OutputBufferResult { Code = "AUTO_COPY_READ", Method = "AUTO_CLIPBOARD",
+                Detail = "A2|320|385|20|40|360|320|1000|900|B2|1920|1040|12|1|3|4|1|2|1", Text = "sentinel" }));
+            if (automatic.Code != "AUTO_COPY_READ" || automatic.Method != "AUTO_CLIPBOARD" || automatic.Text != "sentinel")
+                throw new InvalidOperationException("Auto copy result did not survive the OB1 wire.");
             result.Text = new string('x', MaxCharacters + 1);
-            try { Serialize(result); } catch (InvalidDataException) { return; }
-            throw new InvalidOperationException("Oversize buffer silently accepted.");
+            var oversize = false;
+            try { Serialize(result); } catch (InvalidDataException) { oversize = true; }
+            if (!oversize) throw new InvalidOperationException("Oversize buffer silently accepted.");
+            OutputAutoCopy.SelfTest();
         }
     }
 }
