@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Pre-release tag to publish from this commit, e.g. v0.1.49-rc1'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -30,3 +36,26 @@ jobs:
             dist/*.zip
             dist/SHA256SUMS.txt
             dist/verification-*/*.log
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Release build, self-test, package
+        shell: powershell
+        run: .\scripts\build-package.ps1
+      - name: Publish pre-release with packages
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $files = Get-ChildItem dist\*.zip, dist\SHA256SUMS.txt | ForEach-Object { $_.FullName }
+          gh release create $env:RELEASE_TAG --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Slave-only ZIP is for the current Slave field test; see HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
