@@ -29,7 +29,8 @@ namespace RemoteMonitorLink
         private static readonly string[] Codes = { "OK", "OUTPUT_READ", "NOT_OBSERVED", "IDENTITY_UNAVAILABLE", "WINDOW_UNAVAILABLE",
             "AMBIGUOUS_WINDOWS", "OUTPUT_UNAVAILABLE", "OUTPUT_AMBIGUOUS", "STATUS_UNAVAILABLE", "UI_UNAVAILABLE", "TIMEOUT", "WORKER_FAILED",
             "VISION_NOT_CONFIGURED", "VISION_BUSY", "VISION_SERVER_UNAVAILABLE", "VISION_MODEL_UNAVAILABLE", "VISION_MODEL_AMBIGUOUS",
-            "VISION_AUTH_REQUIRED", "VISION_TIMEOUT", "VISION_INVALID_RESPONSE", "VISION_CAPTURE_FAILED", "VISION_FAILED" };
+            "VISION_AUTH_REQUIRED", "VISION_TIMEOUT", "VISION_INVALID_RESPONSE", "VISION_CAPTURE_FAILED", "VISION_FAILED",
+            "OUTPUT_REGION_UNCONFIRMED" };
         internal string Code { get; private set; }
         internal string OutputEvent { get; private set; } = "UNKNOWN";
         internal string OutputFrequency { get; private set; } = "?";
@@ -49,6 +50,9 @@ namespace RemoteMonitorLink
         internal byte[] LocalPaneImage, LocalSuggestedImage;
         internal LocalVisionModel LocalModelInfo;
         internal string LocalSampleId, LocalOcrSampleId, LocalRegionInfo;
+        // Metadata only, never serialized: captured frame size and the B2 body-search counters for this run.
+        internal System.Drawing.Size LocalFrameSize;
+        internal string LocalBodyDiagnostics;
         internal string LocalVisionMode;
         internal int LocalRequestTimeoutSeconds;
         internal long LocalElapsedMs, LocalLocateMs, LocalReadMs;
@@ -755,12 +759,16 @@ namespace RemoteMonitorLink
             visionResult.LocalOcrSampleId = new string('B', 64);
             visionResult.LocalVisionMode = "OCR_ONLY";
             visionResult.LocalRequestTimeoutSeconds = 90;
+            visionResult.LocalFrameSize = new System.Drawing.Size(1920, 1080);
+            visionResult.LocalBodyDiagnostics = "B2|1920|1080|7|1|4|1|0|1|0";
             var visionWire = visionResult.Serialize(); var visionRoundTrip = Parse(visionWire);
             if (!visionWire.StartsWith("PS2:") || !visionRoundTrip.IsVision || visionRoundTrip.CapturedUtc != seenAt ||
                 visionRoundTrip.Summary != visionResult.Summary || visionRoundTrip.LocalEvidence != null || visionRoundTrip.LocalImage != null ||
                 visionRoundTrip.LocalModel != null || visionRoundTrip.LocalFullImage != null || visionRoundTrip.LocalCaptureInfo != null ||
                 visionRoundTrip.LocalModelInfo != null || visionRoundTrip.LocalSampleId != null || visionRoundTrip.LocalOcrSampleId != null ||
                 visionRoundTrip.LocalVisionMode != null || visionRoundTrip.LocalRequestTimeoutSeconds != 0 ||
+                visionRoundTrip.LocalBodyDiagnostics != null || !visionRoundTrip.LocalFrameSize.IsEmpty ||
+                visionWire.Contains("B2|") ||
                 visionWire.Contains("private") || visionRoundTrip.OutputFrequency != "38.000_MHZ")
                 throw new InvalidOperationException("Local vision source/time or data boundary failed.");
             foreach (var invalid in new[] { visionWire.Replace(":VISION:", ":CLOUD:"), visionWire.Substring(0, visionWire.LastIndexOf(':') + 1) + "0",
@@ -769,6 +777,11 @@ namespace RemoteMonitorLink
                 try { Parse(invalid); throw new InvalidOperationException("Malformed vision metadata accepted."); }
                 catch (InvalidDataException) { }
             }
+            var unconfirmed = VisionUnavailable("OUTPUT_REGION_UNCONFIRMED");
+            unconfirmed.LocalBodyDiagnostics = "B2|1920|1080|7|0|4|1|0|2|0";
+            if (Parse(unconfirmed.Serialize()).Code != "OUTPUT_REGION_UNCONFIRMED" || !Parse(unconfirmed.Serialize()).IsVision ||
+                Parse(unconfirmed.Serialize()).OutputExposed || unconfirmed.Serialize().Contains("B2"))
+                throw new InvalidOperationException("Unconfirmed Output body code did not round-trip as metadata.");
             if (PowerSiVision.CaptureAsync(new ProcessInventory(), new LocalVisionSettings(), CancellationToken.None).GetAwaiter().GetResult().Code != "VISION_NOT_CONFIGURED")
                 throw new InvalidOperationException("Unconfigured vision did not stay disabled.");
             if (CaptureAsync(new ProcessInventory(), CancellationToken.None).GetAwaiter().GetResult().Code != "NOT_OBSERVED")

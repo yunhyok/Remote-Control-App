@@ -33,6 +33,7 @@ namespace RemoteMonitorLink
             var phaseClock = new Stopwatch();
             long locateMs = 0, readMs = 0;
             string regionInfo = null;
+            string bodyDiagnostics = null;
             string captureInfo = null, model = null, stage = "CAPTURE";
             PowerSiObservation Finish(PowerSiObservation result)
             {
@@ -45,6 +46,8 @@ namespace RemoteMonitorLink
                 result.LocalModelInfo = modelInfo;
                 result.LocalModel = modelInfo?.Id ?? model;
                 result.LocalRegionInfo = regionInfo;
+                result.LocalBodyDiagnostics = bodyDiagnostics;
+                result.LocalFrameSize = frame == null ? Size.Empty : frame.PixelSize;
                 result.LocalVisionMode = savedCrop == null ? "LOCATE_OCR" : "OCR_ONLY";
                 result.LocalRequestTimeoutSeconds = settings.TimeoutSeconds;
                 result.LocalElapsedMs = elapsed.ElapsedMilliseconds;
@@ -68,6 +71,7 @@ namespace RemoteMonitorLink
                         pane = savedCrop.LocalPaneImage;
                         suggested = savedCrop.LocalSuggestedImage;
                         regionInfo = savedCrop.LocalRegionInfo;
+                        bodyDiagnostics = savedCrop.LocalBodyDiagnostics;
                         captureInfo = savedCrop.LocalCaptureInfo;
                         stage = "REUSE_CROP";
                         progress?.Report(stage);
@@ -88,7 +92,9 @@ namespace RemoteMonitorLink
                         stage = "CROP_OUTPUT"; progress?.Report(stage);
                         suggested = PowerSiScreenCapture.Crop(frame, region.Bounds);
                         regionInfo = "P2|" + Box(region.Bounds);
-                        var body = OutputPaneImage.FindBody(frame, region.Bounds, deadline.Token);
+                        BodySearchDiagnostics bodySearch;
+                        var body = OutputPaneImage.FindBody(frame, region.Bounds, deadline.Token, out bodySearch);
+                        bodyDiagnostics = bodySearch.Summary();
                         pane = PowerSiScreenCapture.Crop(frame, body);
                         crop = OutputPaneImage.OcrInput(frame, body);
                         var ocrSize = new Size(body.Width, Math.Min(256, body.Height));
@@ -120,6 +126,7 @@ namespace RemoteMonitorLink
             catch (LocalVisionException ex)
             {
                 modelInfo = ex.LocalModelInfo ?? modelInfo;
+                bodyDiagnostics = ex.Detail ?? bodyDiagnostics; // Metadata-only B2 counters from the failed body search.
                 var result = Failed(MapError(ex.Code), stage + "_" + ex.Code);
                 if (ex.LocalResponse != null)
                     result.LocalEvidence = "[UNVALIDATED LM STUDIO RESPONSE — NOT USED AS SIMULATION STATUS]\r\n" +
@@ -150,6 +157,7 @@ namespace RemoteMonitorLink
             switch (code)
             {
                 case "SETTINGS_INVALID": case "DISABLED": return "VISION_NOT_CONFIGURED";
+                case "REGION_BOUNDARY_UNCONFIRMED": return "OUTPUT_REGION_UNCONFIRMED";
                 case "TIMEOUT": return "VISION_TIMEOUT";
                 case "OUTPUT_UNREADABLE": return "OUTPUT_UNAVAILABLE";
                 case "AUTH_REQUIRED": return "VISION_AUTH_REQUIRED";

@@ -68,6 +68,8 @@ namespace RemoteMonitorLink
         internal string LocalResponse;
         internal string LocalModel;
         internal LocalVisionModel LocalModelInfo;
+        // Metadata-only failure detail (for example BodySearchDiagnostics.Summary()); safe for the diagnostic log.
+        internal string Detail { get; set; }
         internal LocalVisionException(string code) : base(code) { Code = code; }
     }
 

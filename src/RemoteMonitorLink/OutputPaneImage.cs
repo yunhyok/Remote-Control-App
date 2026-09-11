@@ -2,23 +2,63 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace RemoteMonitorLink
 {
+    // Metadata-only account of one body search. Counts and geometry never contain screen text, so
+    // Summary() may be logged; the rectangles stay local for the diagnostic bundle.
+    internal sealed class BodySearchDiagnostics
+    {
+        internal int FrameWidth, FrameHeight;
+        internal int Components;
+        internal int Accepted;
+        internal int RejectedSize, RejectedFill, RejectedTooLarge, RejectedCenter, RejectedOverlap;
+        internal Rectangle? First, Second;
+
+        internal string Summary()
+        {
+            var values = new[] { FrameWidth, FrameHeight, Components, Accepted,
+                RejectedSize, RejectedFill, RejectedTooLarge, RejectedCenter, RejectedOverlap };
+            var text = new StringBuilder("B2");
+            for (int i = 0; i < values.Length; i++)
+                text.Append('|').Append(values[i].ToString(CultureInfo.InvariantCulture));
+            return text.ToString();
+        }
+    }
+
     internal static class OutputPaneImage
     {
+        // API (phase 2 / Slave auto-copy):
+        //   Rectangle FindBody(frame, suggested, cancellation)                       — unchanged behaviour.
+        //   Rectangle FindBody(frame, suggested, cancellation, out BodySearchDiagnostics diag)
+        //   Rectangle FindBodyAt(frame, anchor, cancellation, out BodySearchDiagnostics diag)
+        //       — anchor is a client-area point (same pixel space as the frame); the returned body contains it.
+        //   byte[] OcrInput(frame, body)                                             — unchanged.
+        // Every failure is LocalVisionException("REGION_BOUNDARY_UNCONFIRMED") with Detail = diag.Summary()
+        // (metadata only) whenever a scan actually ran; IMAGE_INVALID keeps its own code and no Detail.
+        //
         // ponytail: temporary PowerSI flat neutral-background heuristic, not semantic pane identification.
         // Textured/colored panes or panes covering >=90% of the frame need verified UIA geometry instead.
         internal static Rectangle FindBody(PowerSiFrame frame, Rectangle suggested, CancellationToken cancellation)
         {
+            BodySearchDiagnostics ignored;
+            return FindBody(frame, suggested, cancellation, out ignored);
+        }
+
+        internal static Rectangle FindBody(PowerSiFrame frame, Rectangle suggested, CancellationToken cancellation,
+            out BodySearchDiagnostics diag)
+        {
             cancellation.ThrowIfCancellationRequested();
             ValidateFrame(frame);
             int width = frame.PixelSize.Width, height = frame.PixelSize.Height;
+            diag = new BodySearchDiagnostics { FrameWidth = width, FrameHeight = height };
             if (!Inside(suggested, frame.PixelSize) || suggested.Size == frame.PixelSize)
-                throw new LocalVisionException("REGION_BOUNDARY_UNCONFIRMED");
+                throw Unconfirmed(diag);
             var colors = NeutralColors(frame, cancellation);
             var queue = new int[colors.Length];
             var center = new Point(suggested.X + suggested.Width / 2, suggested.Y + suggested.Height / 2);
@@ -28,6 +68,7 @@ namespace RemoteMonitorLink
                 if ((start & 65535) == 0) cancellation.ThrowIfCancellationRequested();
                 byte color = colors[start];
                 if (color == 0) continue;
+                diag.Components++;
                 int head = 0, tail = 1, left = start % width, right = left, top = start / width, bottom = top;
                 queue[0] = start; colors[start] = 0;
                 while (head < tail)
@@ -43,16 +84,51 @@ namespace RemoteMonitorLink
                 }
                 var bounds = Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
                 long area = (long)bounds.Width * bounds.Height;
-                if (bounds.Width < 120 || bounds.Height < 80 || tail < 10000 || tail * 100L < area * 55 ||
-                    area * 10 >= (long)width * height * 9 || !bounds.Contains(center)) continue;
+                // Same acceptance test as before; the counters only record which rule rejected first.
+                if (bounds.Width < 120 || bounds.Height < 80 || tail < 10000) { diag.RejectedSize++; continue; }
+                if (tail * 100L < area * 55) { diag.RejectedFill++; continue; }
+                if (area * 10 >= (long)width * height * 9) { diag.RejectedTooLarge++; continue; }
+                if (!bounds.Contains(center)) { diag.RejectedCenter++; continue; }
                 var overlap = Rectangle.Intersect(bounds, suggested);
-                if ((long)overlap.Width * overlap.Height * 2 < Math.Min(area, (long)suggested.Width * suggested.Height)) continue;
-                if (found.HasValue) throw new LocalVisionException("REGION_BOUNDARY_UNCONFIRMED");
-                found = bounds;
+                if ((long)overlap.Width * overlap.Height * 2 < Math.Min(area, (long)suggested.Width * suggested.Height))
+                { diag.RejectedOverlap++; continue; }
+                diag.Accepted++;
+                if (found.HasValue) { diag.Second = bounds; throw Unconfirmed(diag); }
+                found = bounds; diag.First = bounds;
             }
             cancellation.ThrowIfCancellationRequested();
-            if (!found.HasValue) throw new LocalVisionException("REGION_BOUNDARY_UNCONFIRMED");
+            if (!found.HasValue) throw Unconfirmed(diag);
             return found.Value;
+        }
+
+        // The learned click point replaces the LLM proposal: a small suggestion box centered on the anchor.
+        internal static Rectangle FindBodyAt(PowerSiFrame frame, Point anchor, CancellationToken cancellation,
+            out BodySearchDiagnostics diag)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            ValidateFrame(frame);
+            var size = frame.PixelSize;
+            diag = new BodySearchDiagnostics { FrameWidth = size.Width, FrameHeight = size.Height };
+            if (anchor.X < 0 || anchor.Y < 0 || anchor.X >= size.Width || anchor.Y >= size.Height)
+                throw Unconfirmed(diag);
+            int boxWidth = Math.Min(AnchorBox, size.Width), boxHeight = Math.Min(AnchorBox, size.Height);
+            int left = Clamp(anchor.X - boxWidth / 2, 0, size.Width - boxWidth);
+            int top = Clamp(anchor.Y - boxHeight / 2, 0, size.Height - boxHeight);
+            var body = FindBody(frame, new Rectangle(left, top, boxWidth, boxHeight), cancellation, out diag);
+            if (!body.Contains(anchor)) throw Unconfirmed(diag);
+            return body;
+        }
+
+        private const int AnchorBox = 40;
+
+        private static int Clamp(int value, int low, int high)
+        { return value < low ? low : (value > high ? high : value); }
+
+        private static LocalVisionException Unconfirmed(BodySearchDiagnostics diag)
+        {
+            var failure = new LocalVisionException("REGION_BOUNDARY_UNCONFIRMED");
+            if (diag != null) failure.Detail = diag.Summary();
+            return failure;
         }
 
         private static void Visit(int pixel, byte color, byte[] colors, int[] queue, ref int tail)
@@ -216,6 +292,73 @@ namespace RemoteMonitorLink
             {
                 int scale = width <= 2048 ? 2 : 1;
                 Check(output.Size == new Size(width * scale, 60 * scale), "short body and maximum OCR dimensions");
+            }
+            // Body search diagnostics and the anchor-driven search used by Output auto-copy.
+            string RejectDetail(Action action)
+            {
+                try { action(); }
+                catch (LocalVisionException ex) when (ex.Code == "REGION_BOUNDARY_UNCONFIRMED")
+                {
+                    if (string.IsNullOrEmpty(ex.Detail) || !ex.Detail.StartsWith("B2|", StringComparison.Ordinal))
+                        throw new InvalidOperationException("Body search failure lost its diagnostics.");
+                    return ex.Detail;
+                }
+                throw new InvalidOperationException("Body search accepted an unconfirmed boundary.");
+            }
+            using (var bitmap = new Bitmap(600, 420, PixelFormat.Format24bppRgb))
+            {
+                using (var graphics = Graphics.FromImage(bitmap))
+                using (var background = new SolidBrush(Color.FromArgb(232, 232, 232)))
+                {
+                    graphics.Clear(Color.DarkBlue);
+                    graphics.FillRectangle(background, body);
+                    graphics.FillRectangle(background, new Rectangle(410, 40, 175, 320));
+                    for (int y = 55; y < 350; y += 16) graphics.FillRectangle(Brushes.Black, 30, y, 300, 2);
+                }
+                var frame = Frame(bitmap);
+                BodySearchDiagnostics diag;
+                Check(FindBody(frame, suggested, CancellationToken.None, out diag) == body, "diagnostic overload keeps the accepted body");
+                Check(diag.Accepted == 1 && diag.First == body && !diag.Second.HasValue, "one flat body is the only accepted candidate");
+                Check(diag.FrameWidth == 600 && diag.FrameHeight == 420, "body diagnostics record the frame size");
+                Check(diag.RejectedSize > 0 && diag.RejectedCenter > 0 && diag.RejectedFill == 0 && diag.RejectedTooLarge == 0 &&
+                    diag.RejectedOverlap == 0, "rejected components are counted by their own rule");
+                Check(diag.Components == diag.Accepted + diag.RejectedSize + diag.RejectedFill + diag.RejectedTooLarge +
+                    diag.RejectedCenter + diag.RejectedOverlap, "every scanned component is classified exactly once");
+                var fields = diag.Summary().Split('|');
+                Check(fields.Length == 10 && fields[0] == "B2" && fields[1] == "600" && fields[2] == "420" && fields[4] == "1",
+                    "body diagnostics summary keeps the B2 metadata order");
+                for (int i = 1; i < fields.Length; i++)
+                {
+                    int parsed;
+                    Check(int.TryParse(fields[i], NumberStyles.None, CultureInfo.InvariantCulture, out parsed) && parsed >= 0,
+                        "body diagnostics summary carries only non-negative integers");
+                }
+                // Center of the proposal falls between the two panes: every candidate is rejected by the center rule.
+                var missed = RejectDetail(() => FindBody(frame, new Rectangle(200, 150, 360, 160), CancellationToken.None)).Split('|');
+                Check(missed[4] == "0" && int.Parse(missed[8], CultureInfo.InvariantCulture) > 1,
+                    "proposal whose center misses every body is rejected and counted");
+                BodySearchDiagnostics anchored;
+                Check(FindBodyAt(frame, new Point(200, 200), CancellationToken.None, out anchored) == body &&
+                    anchored.Accepted == 1 && anchored.FrameWidth == 600 && anchored.First == body,
+                    "anchor inside the body resolves the whole body");
+                Check(FindBodyAt(frame, new Point(60, 350), CancellationToken.None, out anchored) == body,
+                    "anchor on a text row still resolves the surrounding body");
+                // Clamped anchor box near the frame edge may select a neighbouring body: it must not be returned.
+                RejectDetail(() => { BodySearchDiagnostics ignored; FindBodyAt(frame, new Point(595, 200), CancellationToken.None, out ignored); });
+                RejectDetail(() => { BodySearchDiagnostics ignored; FindBodyAt(frame, new Point(595, 415), CancellationToken.None, out ignored); });
+                RejectDetail(() => { BodySearchDiagnostics ignored; FindBodyAt(frame, new Point(-1, 5), CancellationToken.None, out ignored); });
+                RejectDetail(() => { BodySearchDiagnostics ignored; FindBodyAt(frame, new Point(0, 420), CancellationToken.None, out ignored); });
+            }
+            using (var bitmap = new Bitmap(600, 420, PixelFormat.Format24bppRgb))
+            {
+                using (var graphics = Graphics.FromImage(bitmap))
+                {
+                    graphics.Clear(Color.DarkBlue);
+                    graphics.FillRectangle(Brushes.White, 30, 30, 400, 350);
+                    graphics.FillRectangle(Brushes.Gray, 130, 125, 160, 140);
+                }
+                var ambiguous = RejectDetail(() => FindBody(Frame(bitmap), new Rectangle(140, 140, 120, 100), CancellationToken.None)).Split('|');
+                Check(ambiguous[4] == "2", "two bodies overlapping the proposal are both reported before the failure");
             }
         }
     }
