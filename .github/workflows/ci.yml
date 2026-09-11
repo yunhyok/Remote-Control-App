@@ -50,12 +50,23 @@ jobs:
       - name: Release build, self-test, package
         shell: powershell
         run: .\scripts\build-package.ps1
+      - name: Slave-only package
+        shell: powershell
+        run: .\scripts\build-package.ps1 -SlaveOnly
       - name: Publish pre-release with packages
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          $files = Get-ChildItem dist\*.zip, dist\SHA256SUMS.txt | ForEach-Object { $_.FullName }
-          gh release create $env:RELEASE_TAG --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Slave-only ZIP is for the current Slave field test; see HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
-          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+          $zips = Get-ChildItem dist\*.zip
+          $sums = $zips | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)  $($_.Name)" }
+          Set-Content -LiteralPath dist\SHA256SUMS.txt -Value $sums -Encoding ASCII
+          $files = @($zips | ForEach-Object { $_.FullName }) + (Resolve-Path dist\SHA256SUMS.txt).Path
+          cmd /c "gh release view $env:RELEASE_TAG >nul 2>&1"
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @files --clobber
+          } else {
+            gh release create $env:RELEASE_TAG --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Use Remote-Monitor-Slave-*.zip for the current Slave field test; the full ZIP also contains the Win7 Master. See HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'gh release publish failed.' }
