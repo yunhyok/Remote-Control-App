@@ -22,6 +22,9 @@ namespace RemoteMonitorLink
         internal string ModelId = "";
         internal string ApiToken = ""; // Cleartext is runtime only; persistence must be encrypted and never logged.
         internal int TimeoutSeconds = 60;
+        // Slave-only: allow one click + Ctrl+A/Ctrl+C at a learned, re-verified Output position. Never used by the
+        // vision client itself; the Slave reads it before starting its auto-copy worker.
+        internal bool AutoCopyEnabled = true;
 
         internal void Validate()
         {
@@ -35,7 +38,7 @@ namespace RemoteMonitorLink
         internal LocalVisionSettings Clone()
         {
             return new LocalVisionSettings { Enabled = Enabled, Port = Port, ModelId = ModelId,
-                ApiToken = ApiToken, TimeoutSeconds = TimeoutSeconds };
+                ApiToken = ApiToken, TimeoutSeconds = TimeoutSeconds, AutoCopyEnabled = AutoCopyEnabled };
         }
     }
 

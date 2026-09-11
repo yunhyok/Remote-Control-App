@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -280,23 +279,13 @@ namespace RemoteMonitorSlave
         }
 
         // The screenshot worker owns the capture rules (visibility, blank and size checks); reuse it in this process
-        // instead of spawning a second worker. SelfTest() verifies that the reused method is still present.
-        private static readonly MethodInfo CaptureWindowMethod = typeof(PowerSiScreenCapture).GetMethod("CaptureWindow",
-            BindingFlags.NonPublic | BindingFlags.Static, null, new[] { typeof(IntPtr) }, null);
-
+        // instead of spawning a second worker. Its SC_* failures become this verb's capture detail.
         private static PowerSiFrame CaptureFrame(IntPtr window)
         {
-            if (CaptureWindowMethod == null || CaptureWindowMethod.ReturnType != typeof(PowerSiFrame))
-                throw Failure("AUTO_COPY_CAPTURE_UNAVAILABLE", null);
-            object frame;
-            try { frame = CaptureWindowMethod.Invoke(null, new object[] { window }); }
-            catch (TargetInvocationException error)
-            {
-                var inner = error.InnerException as InvalidDataException;
-                throw Failure("AUTO_COPY_CAPTURE_FAILED", inner == null ? null : inner.Message);
-            }
+            PowerSiFrame captured;
+            try { captured = PowerSiScreenCapture.CaptureWindow(window); }
+            catch (InvalidDataException error) { throw Failure("AUTO_COPY_CAPTURE_FAILED", Sanitize(error.Message)); }
             catch { throw Failure("AUTO_COPY_CAPTURE_FAILED", null); }
-            var captured = frame as PowerSiFrame;
             if (captured == null || captured.Png == null) throw Failure("AUTO_COPY_CAPTURE_FAILED", null);
             return captured;
         }
@@ -417,7 +406,9 @@ namespace RemoteMonitorSlave
 
         // ---------------------------------------------------------------- results
 
-        private sealed class AutoCopyException : InvalidDataException
+        // InvalidDataException is sealed, so this carries the fixed code in Message and the metadata-only detail.
+        // RunWorker maps it, plain InvalidDataException (SC_* window/capture codes) and anything else to a result.
+        private sealed class AutoCopyException : Exception
         {
             internal readonly string Detail;
             internal AutoCopyException(string code, string detail) : base(code) { Detail = detail; }
@@ -509,8 +500,6 @@ namespace RemoteMonitorSlave
                 Marshal.SizeOf(typeof(InputUnion)) == (IntPtr.Size == 8 ? 32 : 24) &&
                 Marshal.SizeOf(typeof(MouseInput)) == (IntPtr.Size == 8 ? 32 : 24) &&
                 Marshal.SizeOf(typeof(KeyboardInput)) == (IntPtr.Size == 8 ? 24 : 16), "INPUT union layout");
-            Need(CaptureWindowMethod != null && CaptureWindowMethod.ReturnType == typeof(PowerSiFrame),
-                "reused in-process window capture is still available");
             foreach (var key in new[] { VirtualA, VirtualC })
             {
                 var packets = ComposeChord(key);

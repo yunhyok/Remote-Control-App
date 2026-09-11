@@ -20,6 +20,9 @@ namespace RemoteMonitorSlave
             var values = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
             var result = new LocalVisionSettings { Enabled = (bool)values["enabled"], Port = (int)values["port"],
                 ModelId = (string)values["model"], TimeoutSeconds = (int)values["timeout_seconds"] };
+            // Older settings files have no auto-copy key; a missing or non-boolean value keeps the default.
+            object autoCopy;
+            result.AutoCopyEnabled = !values.TryGetValue("auto_copy", out autoCopy) || !(autoCopy is bool) || (bool)autoCopy;
             var encrypted = (string)values["protected_token"];
             if (encrypted.Length != 0)
             {
@@ -38,7 +41,8 @@ namespace RemoteMonitorSlave
             finally { Array.Clear(clear, 0, clear.Length); }
             var text = new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
                 { "enabled", settings.Enabled }, { "port", settings.Port }, { "model", settings.ModelId },
-                { "timeout_seconds", settings.TimeoutSeconds }, { "protected_token", encrypted } });
+                { "timeout_seconds", settings.TimeoutSeconds }, { "auto_copy", settings.AutoCopyEnabled },
+                { "protected_token", encrypted } });
             // This is a small per-user setting file. Incomplete settings fail disabled on the next launch.
             File.WriteAllText(path, text, new UTF8Encoding(false));
         }
@@ -47,14 +51,23 @@ namespace RemoteMonitorSlave
             var path = Path.Combine(directory, "vision-settings-check.json");
             var settings = new LocalVisionSettings { Enabled = true, ModelId = "replaceable-vision-model", ApiToken = "private-test-token" };
             Save(path, settings); var read = Load(path);
-            if (read.ModelId != settings.ModelId || read.ApiToken != settings.ApiToken || !read.Enabled ||
+            if (read.ModelId != settings.ModelId || read.ApiToken != settings.ApiToken || !read.Enabled || !read.AutoCopyEnabled ||
                 File.ReadAllText(path).Contains(settings.ApiToken)) throw new InvalidOperationException("Local vision settings persistence failed.");
+            settings.AutoCopyEnabled = false;
+            Save(path, settings);
+            if (Load(path).AutoCopyEnabled) throw new InvalidOperationException("Disabled Output auto copy was not persisted.");
+            // A settings file written before v0.1.49 has no auto-copy key and must load with the default.
+            var legacy = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
+            legacy.Remove("auto_copy");
+            File.WriteAllText(path, new JavaScriptSerializer().Serialize(legacy), new UTF8Encoding(false));
+            if (!Load(path).AutoCopyEnabled) throw new InvalidOperationException("Settings without the auto copy key lost its default.");
         }
     }
 
     internal sealed class LocalVisionSettingsForm : Form
     {
         private readonly CheckBox enabled = new CheckBox { Text = "PowerSI 화면의 로컬 LLM 판독 사용", AutoSize = true };
+        private readonly CheckBox autoCopy = new CheckBox { Text = "학습한 Output 위치로 자동 복사 (클릭·Ctrl+A/C 한 번)", AutoSize = true };
         private readonly NumericUpDown port = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 1234 };
         private readonly NumericUpDown timeout = new NumericUpDown { Minimum = 15, Maximum = 90, Value = 60 };
         private readonly ComboBox model = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown };
@@ -66,25 +79,28 @@ namespace RemoteMonitorSlave
         internal LocalVisionSettingsForm(LocalVisionSettings settings)
         {
             Text = Program.Title + " — LM Studio 설정"; Font = new Font("Segoe UI", 9F);
-            ClientSize = new Size(640, 420); FormBorderStyle = FormBorderStyle.FixedDialog;
+            ClientSize = new Size(640, 452); FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false; StartPosition = FormStartPosition.CenterParent;
             Controls.Add(new Label { Text = "같은 PC의 127.0.0.1에만 연결합니다. 화면/판독 원문은 Master에 보내지 않습니다.\r\nLM Studio에서 이미지 지원 모델을 로드하고 Developer → Start server를 켜세요.",
                 Bounds = new Rectangle(18, 16, 604, 46) });
             enabled.SetBounds(18, 70, 500, 24); enabled.Checked = settings.Enabled;
-            Controls.Add(new Label { Text = "LM Studio 포트", Bounds = new Rectangle(18, 108, 140, 24) });
-            port.SetBounds(170, 104, 100, 28); port.Value = settings.Port;
-            Controls.Add(new Label { Text = "단계별 제한 (초)", Bounds = new Rectangle(320, 108, 135, 24) });
-            timeout.SetBounds(472, 104, 100, 28); timeout.Value = settings.TimeoutSeconds;
-            Controls.Add(new Label { Text = "모델 ID (빈칸: 이미지 지원 모델이 하나일 때 자동 선택)", Bounds = new Rectangle(18, 148, 604, 24) });
-            model.SetBounds(18, 176, 440, 28); model.Text = settings.ModelId;
-            var discover = new Button { Text = "로드된 모델 확인", Bounds = new Rectangle(470, 173, 152, 34) };
-            Controls.Add(new Label { Text = "API token (LM Studio에 설정한 경우만; 이 Windows 사용자용으로 암호화 저장)", Bounds = new Rectangle(18, 222, 604, 24) });
-            token.SetBounds(18, 250, 604, 28); token.Text = settings.ApiToken;
-            message.SetBounds(18, 289, 604, 62);
-            message.Text = "모델은 자동 다운로드/교체하지 않습니다. 선택한 모델이 없거나 이미지 입력을 지원하지 않으면 확인 불가로 표시합니다.";
-            var save = new Button { Text = "저장", Bounds = new Rectangle(404, 365, 100, 34) };
-            var cancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(516, 365, 106, 34) };
-            Controls.AddRange(new Control[] { enabled, port, timeout, model, discover, token, message, save, cancel });
+            autoCopy.SetBounds(18, 100, 604, 24); autoCopy.Checked = settings.AutoCopyEnabled;
+            autoCopy.AccessibleName = "직독 실패 시 학습한 Output 위치를 다시 확인하고 한 번만 클릭·Ctrl+A·Ctrl+C 실행";
+            Controls.Add(new Label { Text = "LM Studio 포트", Bounds = new Rectangle(18, 138, 140, 24) });
+            port.SetBounds(170, 134, 100, 28); port.Value = settings.Port;
+            Controls.Add(new Label { Text = "단계별 제한 (초)", Bounds = new Rectangle(320, 138, 135, 24) });
+            timeout.SetBounds(472, 134, 100, 28); timeout.Value = settings.TimeoutSeconds;
+            Controls.Add(new Label { Text = "모델 ID (빈칸: 이미지 지원 모델이 하나일 때 자동 선택)", Bounds = new Rectangle(18, 178, 604, 24) });
+            model.SetBounds(18, 206, 440, 28); model.Text = settings.ModelId;
+            var discover = new Button { Text = "로드된 모델 확인", Bounds = new Rectangle(470, 203, 152, 34) };
+            Controls.Add(new Label { Text = "API token (LM Studio에 설정한 경우만; 이 Windows 사용자용으로 암호화 저장)", Bounds = new Rectangle(18, 252, 604, 24) });
+            token.SetBounds(18, 280, 604, 28); token.Text = settings.ApiToken;
+            message.SetBounds(18, 319, 604, 62);
+            message.Text = "모델은 자동 다운로드/교체하지 않습니다. 선택한 모델이 없거나 이미지 입력을 지원하지 않으면 확인 불가로 표시합니다.\r\n" +
+                "자동 복사는 수동 복사 1회로 학습한 위치를 현재 화면에서 다시 확인한 뒤에만 실행하며 클립보드를 바꿉니다.";
+            var save = new Button { Text = "저장", Bounds = new Rectangle(404, 397, 100, 34) };
+            var cancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(516, 397, 106, 34) };
+            Controls.AddRange(new Control[] { enabled, autoCopy, port, timeout, model, discover, token, message, save, cancel });
             CancelButton = cancel;
             discover.Click += async delegate
             {
@@ -113,7 +129,7 @@ namespace RemoteMonitorSlave
         private LocalVisionSettings Current()
         {
             return new LocalVisionSettings { Enabled = enabled.Checked, Port = (int)port.Value, ModelId = model.Text.Trim(),
-                ApiToken = token.Text.Trim(), TimeoutSeconds = (int)timeout.Value };
+                ApiToken = token.Text.Trim(), TimeoutSeconds = (int)timeout.Value, AutoCopyEnabled = autoCopy.Checked };
         }
     }
 }

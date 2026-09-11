@@ -192,7 +192,9 @@ namespace RemoteMonitorLink
             finally { CloseDesktop(desktop); }
         }
 
-        private static PowerSiFrame CaptureWindow(IntPtr window)
+        // Internal so the Slave auto-copy worker can reuse the same visibility/size/blank rules in its own process
+        // instead of spawning a second capture worker. Throws InvalidDataException with an SC_* code on failure.
+        internal static PowerSiFrame CaptureWindow(IntPtr window)
         {
             Rect rect;
             if (!IsWindowVisible(window) || IsIconic(window) || !GetClientRect(window, out rect)) throw Failure("SC_WINDOW_UNAVAILABLE");
