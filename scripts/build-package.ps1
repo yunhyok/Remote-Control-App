@@ -7,7 +7,7 @@ $output = Join-Path $projectRoot 'src\RemoteMonitorMaster\bin\Release\net48'
 $slaveProject = Join-Path $projectRoot 'src\RemoteMonitorSlave\RemoteMonitorSlave.csproj'
 $slaveOutput = Join-Path $projectRoot 'src\RemoteMonitorSlave\bin\Release\net48'
 $dist = Join-Path $projectRoot 'dist'
-$zip = Join-Path $dist $(if ($SlaveOnly) { 'Remote-Monitor-Slave-v0.1.48-win11-net48.zip' } else { 'Remote-Monitor-v0.1.48-win7-win11-net48.zip' })
+$zip = Join-Path $dist $(if ($SlaveOnly) { 'Remote-Monitor-Slave-v0.1.49-win11-net48.zip' } else { 'Remote-Monitor-v0.1.49-win7-win11-net48.zip' })
 $targetProjects = if ($SlaveOnly) { @($slaveProject) } else { @($project, $slaveProject) }
 $targetExecutables = if ($SlaveOnly) { @((Join-Path $slaveOutput 'RemoteMonitorSlave.exe')) } else {
     @((Join-Path $output 'RemoteMonitorMaster.exe'), (Join-Path $slaveOutput 'RemoteMonitorSlave.exe'))
@@ -20,7 +20,7 @@ foreach ($targetProject in $targetProjects) {
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
 }
 foreach ($executable in $targetExecutables) {
-    $verification = Join-Path $dist 'verification-v0.1.48'
+    $verification = Join-Path $dist 'verification-v0.1.49'
     New-Item -ItemType Directory -Path $verification -Force | Out-Null
     $testName = [IO.Path]::GetFileNameWithoutExtension($executable)
     $selfTest = Start-Process -FilePath $executable -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru `
