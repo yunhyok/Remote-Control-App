@@ -18,6 +18,7 @@ namespace RemoteMonitorLink
             PowerSiObservation.SelfTest();
             PowerSiScreenCapture.SelfTest();
             OutputPaneImage.SelfTest();
+            TranscriptComparison.SelfTest();
             LocalVisionClient.SelfTest();
             TestMalformedParsing();
 

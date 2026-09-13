@@ -19,7 +19,13 @@ namespace RemoteMonitorSlave
             if (PowerSiObservation.TryRunWorker(args)) return;
             if (args.Length == 1 && args[0] == "--self-test")
             {
-                try { LinkSelfTest.Run(); PowerSiOutputBuffer.SelfTest(); OutputBufferCapture.SelfTest(); SlaveForm.SelfTest(); Console.WriteLine("PASS: Slave status link and UI checks"); }
+                try
+                {
+                    LinkSelfTest.Run(); PowerSiOutputBuffer.SelfTest(); OutputBufferCapture.SelfTest();
+                    Console.WriteLine(DiagnosticBundle.SelfTest());
+                    SlaveForm.SelfTest();
+                    Console.WriteLine("PASS: Slave status link and UI checks");
+                }
                 catch (Exception ex) { Console.Error.WriteLine(ex); Environment.ExitCode = 1; }
                 return;
             }
@@ -54,6 +60,18 @@ namespace RemoteMonitorSlave
                     Environment.NewLine, new UTF8Encoding(false)); // Each event releases the stream immediately.
         }
 
+        // Fixed code plus bounded key=value metadata (identifiers, integers, hashes, B1/B2/T1/A1/A2 fields).
+        // Screen text, transcripts, file paths and tokens never pass this filter: anything else becomes INVALID.
+        internal void Write(string code, string detail)
+        {
+            if (!System.Text.RegularExpressions.Regex.IsMatch(code, @"\A[A-Z0-9_]{1,64}\z")) code = "LINK_EVENT";
+            if (detail == null || !System.Text.RegularExpressions.Regex.IsMatch(detail, @"\A[A-Za-z0-9_=| ]{1,512}\z"))
+                detail = "detail=INVALID";
+            lock (gate)
+                File.AppendAllText(Path, DateTime.UtcNow.ToString("O") + " version=" + LinkVersion.Value + " code=" + code +
+                    " " + detail + Environment.NewLine, new UTF8Encoding(false));
+        }
+
         internal void WritePowerSi(PowerSiObservation observation)
         {
             var wire = PowerSiObservation.Parse(observation.Serialize()).Serialize();
@@ -70,20 +88,30 @@ namespace RemoteMonitorSlave
                 File.AppendAllText(Path, entry.ToString(), new UTF8Encoding(false));
         }
 
-        private static string ComparisonMetadata(PowerSiObservation result)
+        // Also used by the diagnostic bundle so an exported run carries the same VISION_RUN metadata as the log.
+        internal static string ComparisonMetadata(PowerSiObservation result)
         {
             string Id(string value) => value != null && System.Text.RegularExpressions.Regex.IsMatch(value, @"\A[A-F0-9]{64}\z") ? value : "UNKNOWN";
             string Label(string value) => string.IsNullOrWhiteSpace(value) || value.Length > 256 ? "UNKNOWN" : Uri.EscapeDataString(value);
             var model = result.LocalModelInfo;
             string geometry = result.LocalRegionInfo != null && System.Text.RegularExpressions.Regex.IsMatch(result.LocalRegionInfo, @"\AP2(\|[0-9]{1,5}){4}((\|[0-9]{1,5}){6})?\z")
                 ? result.LocalRegionInfo : "UNKNOWN";
+            string frame = result.LocalFrameSize.Width > 0 && result.LocalFrameSize.Height > 0 &&
+                result.LocalFrameSize.Width <= 99999 && result.LocalFrameSize.Height <= 99999
+                ? result.LocalFrameSize.Width.ToString(System.Globalization.CultureInfo.InvariantCulture) + "x" +
+                    result.LocalFrameSize.Height.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "UNKNOWN";
+            string body = result.LocalBodyDiagnostics != null &&
+                System.Text.RegularExpressions.Regex.IsMatch(result.LocalBodyDiagnostics, @"\AB2(\|[0-9]{1,7}){9}\z")
+                ? result.LocalBodyDiagnostics : "UNKNOWN";
             return " mode=" + (result.LocalVisionMode == "OCR_ONLY" ? "OCR_ONLY crop_reused=1" : "LOCATE_OCR crop_reused=0") +
                 " request_timeout_s=" + Math.Max(0, Math.Min(90, result.LocalRequestTimeoutSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                 " sample=" + Id(result.LocalSampleId) + " ocr_sample=" + Id(result.LocalOcrSampleId) +
                 " model_id=" + Label(model?.Id) + " model_name=" + Label(model?.DisplayName) + " model_key=" + Label(model?.Key) +
                 " quantization=" + Label(model?.Quantization) + " total_ms=" + Math.Max(0, result.LocalElapsedMs).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                 " locate_ms=" + Math.Max(0, result.LocalLocateMs).ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                " read_ms=" + Math.Max(0, result.LocalReadMs).ToString(System.Globalization.CultureInfo.InvariantCulture) + " geometry=" + geometry;
+                " read_ms=" + Math.Max(0, result.LocalReadMs).ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                " geometry=" + geometry + " frame=" + frame + " body=" + body;
         }
 
         internal void WriteOutputBuffer(OutputBufferResult result)

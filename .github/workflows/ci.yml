@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Pre-release tag to publish from this commit, e.g. v0.1.50-rc1'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -19,9 +25,48 @@ jobs:
       - name: Release build, self-test, package
         shell: powershell
         run: .\scripts\build-package.ps1
+      - name: Show self-test output
+        if: always()
+        shell: powershell
+        run: Get-ChildItem dist\verification-*\*.log -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "=== $($_.Name) ==="; Get-Content $_.FullName }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Remote-Monitor-v0.1.48-win7-win11-net48
+          name: Remote-Monitor-v0.1.50-win7-win11-net48
           path: |
             dist/*.zip
             dist/SHA256SUMS.txt
+            dist/verification-*/*.log
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 8.0.x
+      - name: Release build, self-test, package
+        shell: powershell
+        run: .\scripts\build-package.ps1
+      - name: Slave-only package
+        shell: powershell
+        run: .\scripts\build-package.ps1 -SlaveOnly
+      - name: Publish pre-release with packages
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $zips = Get-ChildItem dist\*.zip
+          $sums = $zips | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)  $($_.Name)" }
+          Set-Content -LiteralPath dist\SHA256SUMS.txt -Value $sums -Encoding ASCII
+          $files = @($zips | ForEach-Object { $_.FullName }) + (Resolve-Path dist\SHA256SUMS.txt).Path
+          cmd /c "gh release view $env:RELEASE_TAG >nul 2>&1"
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG @files --clobber
+          } else {
+            gh release create $env:RELEASE_TAG --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Use Remote-Monitor-Slave-*.zip for the current Slave field test; the full ZIP also contains the Win7 Master. See HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'gh release publish failed.' }
