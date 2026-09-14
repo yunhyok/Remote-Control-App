@@ -65,7 +65,7 @@ namespace RemoteMonitorSlave
         internal void Write(string code, string detail)
         {
             if (!System.Text.RegularExpressions.Regex.IsMatch(code, @"\A[A-Z0-9_]{1,64}\z")) code = "LINK_EVENT";
-            if (detail == null || !System.Text.RegularExpressions.Regex.IsMatch(detail, @"\A[A-Za-z0-9_=| ]{1,512}\z"))
+            if (detail == null || !System.Text.RegularExpressions.Regex.IsMatch(detail, @"\A[A-Za-z0-9_=| \-]{1,512}\z"))
                 detail = "detail=INVALID";
             lock (gate)
                 File.AppendAllText(Path, DateTime.UtcNow.ToString("O") + " version=" + LinkVersion.Value + " code=" + code +

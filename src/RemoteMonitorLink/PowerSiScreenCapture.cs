@@ -69,13 +69,15 @@ namespace RemoteMonitorLink
         {
             using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
                 workerArgument + " " + arguments) { UseShellExecute = false, CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true,
+                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true, RedirectStandardError = true,
                     RedirectStandardInput = workerArgument == PrepareWorkerArgument } })
             {
+                Task<string> diagnostics = null;
                 try
                 {
                     cancellation.ThrowIfCancellationRequested();
                     worker.Start();
+                    diagnostics = ReadBounded(worker.StandardError, 4096);
                     if (workerArgument == PrepareWorkerArgument)
                     {
                         cancellation.ThrowIfCancellationRequested();
@@ -94,7 +96,7 @@ namespace RemoteMonitorLink
                     }
                     var reading = ReadBounded(worker.StandardOutput);
                     var clock = Stopwatch.StartNew();
-                    while (!worker.HasExited || !reading.IsCompleted)
+                    while (!worker.HasExited || !reading.IsCompleted || !diagnostics.IsCompleted)
                     {
                         cancellation.ThrowIfCancellationRequested();
                         if (reading.IsFaulted) await reading.ConfigureAwait(false);
@@ -112,18 +114,22 @@ namespace RemoteMonitorLink
                 {
                     // Only this single-use helper is terminated; the observed application is never killed.
                     try { if (!worker.HasExited) { worker.Kill(); worker.WaitForExit(200); } } catch { }
+                    if (diagnostics != null && diagnostics.Status == TaskStatus.RanToCompletion && diagnostic != null)
+                        foreach (var line in diagnostics.Result.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                            if (IsWindowDiagnostic(line))
+                                try { diagnostic(line); } catch { }
                 }
             }
         }
 
-        private static async Task<string> ReadBounded(StreamReader reader)
+        private static async Task<string> ReadBounded(StreamReader reader, int maximum = MaxWireChars)
         {
             var text = new StringBuilder(); var buffer = new char[8192];
             while (true)
             {
                 var count = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
                 if (count == 0) return text.ToString();
-                if (text.Length + count > MaxWireChars) throw Failure("SC_SIZE");
+                if (text.Length + count > maximum) throw Failure("SC_SIZE");
                 text.Append(buffer, 0, count);
             }
         }
@@ -153,12 +159,13 @@ namespace RemoteMonitorLink
 
         private static PowerSiFrame ReadPrepareWorker(string[] args)
         {
-            var window = ResolveWindow(args);
+            var window = ResolveWindow(args, candidate => ReportWindow("selected", candidate));
             Rect windowRect, clientRect;
             ReadGeometry(window, out windowRect, out clientRect);
             RequireResponsive(window); // Windows message responsiveness only; application-internal phases may remain busy.
             CheckUnchanged(args, window, windowRect, clientRect);
             SetExactForeground(window);
+            ReportWindow("activated", window);
             CheckUnchanged(args, window, windowRect, clientRect);
             RequireForeground(window, "SC_FOREGROUND_MISMATCH_PRECAPTURE");
             var frame = CaptureWindow(window);
@@ -215,7 +222,7 @@ namespace RemoteMonitorLink
         }
 
         // Shared target identity, independent of screenshot or text collection. Single window is the current field-test scope.
-        internal static IntPtr ResolveWindow(string[] args)
+        internal static IntPtr ResolveWindow(string[] args, Action<IntPtr> diagnostic = null)
         {
             int session;
             if (args.Length != 3 || !int.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out session) ||
@@ -232,7 +239,7 @@ namespace RemoteMonitorLink
             if (identities.Count == 0 || identities.Count > ProcessInventory.MaxItems) throw Failure("SC_IDENTITY");
             CheckIdentities(identities, session);
             CheckDesktop(session);
-            return FindWindow(identities);
+            return FindWindow(identities, diagnostic);
         }
 
         private static void CheckIdentities(Dictionary<int, long> identities, int session)
@@ -252,7 +259,7 @@ namespace RemoteMonitorLink
             }
         }
 
-        private static IntPtr FindWindow(Dictionary<int, long> identities)
+        private static IntPtr FindWindow(Dictionary<int, long> identities, Action<IntPtr> diagnostic = null)
         {
             var windows = new List<IntPtr>();
             var enumerated = EnumWindows((window, ignored) =>
@@ -261,11 +268,50 @@ namespace RemoteMonitorLink
                 return TrackVisibleWindow(identities, windows, window, pid, IsWindowVisible(window));
             }, IntPtr.Zero);
             var selected = RequireSingleWindow(windows, enumerated);
+            if (diagnostic != null) diagnostic(selected);
+            uint selectedPid;
+            GetWindowThreadProcessId(selected, out selectedPid);
+            if (selectedPid > int.MaxValue || !identities.ContainsKey((int)selectedPid)) throw Failure("SC_IDENTITY");
             if (IsIconic(selected)) throw Failure("SC_MINIMIZED");
             int cloaked;
             if (DwmGetWindowAttribute(selected, 14, out cloaked, 4) == 0 && cloaked != 0)
                 throw Failure("SC_WINDOW_UNAVAILABLE");
             return selected;
+        }
+
+        // Numeric native metadata only: no window titles, paths, application text or screenshots in ordinary logs.
+        private static void ReportWindow(string stage, IntPtr window)
+        {
+            try { Console.Error.WriteLine(WindowDiagnostic(stage, window)); }
+            catch { } // Best-effort diagnostics must not replace the target's actual result.
+        }
+
+        private static string WindowDiagnostic(string stage, IntPtr window)
+        {
+            uint pid, foregroundPid;
+            GetWindowThreadProcessId(window, out pid);
+            var foreground = GetForegroundWindow();
+            GetWindowThreadProcessId(foreground, out foregroundPid);
+            Rect rect;
+            GetWindowRect(window, out rect);
+            return "stage=" + stage + " hwnd=" + window.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                " pid=" + pid.ToString(CultureInfo.InvariantCulture) +
+                " root=" + GetAncestor(window, 2).ToInt64().ToString(CultureInfo.InvariantCulture) +
+                " owner=" + GetWindow(window, 4).ToInt64().ToString(CultureInfo.InvariantCulture) +
+                " iconic=" + (IsIconic(window) ? "1" : "0") +
+                " style_minimized=" + ((GetWindowLong(window, -16) & 0x20000000) != 0 ? "1" : "0") +
+                " visible=" + (IsWindowVisible(window) ? "1" : "0") +
+                " x=" + rect.Left.ToString(CultureInfo.InvariantCulture) + " y=" + rect.Top.ToString(CultureInfo.InvariantCulture) +
+                " width=" + (rect.Right - rect.Left).ToString(CultureInfo.InvariantCulture) +
+                " height=" + (rect.Bottom - rect.Top).ToString(CultureInfo.InvariantCulture) +
+                " foreground_hwnd=" + foreground.ToInt64().ToString(CultureInfo.InvariantCulture) +
+                " foreground_pid=" + foregroundPid.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static bool IsWindowDiagnostic(string line)
+        {
+            return line != null && line.Length <= 512 && System.Text.RegularExpressions.Regex.IsMatch(line,
+                @"\Astage=(selected|activated) hwnd=-?\d+ pid=\d+ root=-?\d+ owner=-?\d+ iconic=[01] style_minimized=[01] visible=[01] x=-?\d+ y=-?\d+ width=-?\d+ height=-?\d+ foreground_hwnd=-?\d+ foreground_pid=\d+\z");
         }
 
         private static bool TrackVisibleWindow(Dictionary<int, long> identities, List<IntPtr> windows,
@@ -449,12 +495,17 @@ namespace RemoteMonitorLink
 
             var identities = new Dictionary<int, long> { { 41, 123 } };
             var windows = new List<IntPtr>();
+            // Other application windows can appear anywhere in EnumWindows order, including before either target.
+            for (uint otherPid = 100; otherPid < 200; otherPid++)
+                if (!TrackVisibleWindow(identities, windows, new IntPtr(otherPid), otherPid, true) || windows.Count != 0)
+                    throw new InvalidOperationException("An unrelated application's window was selected.");
             if (!TrackVisibleWindow(identities, windows, new IntPtr(420), 42, true) || windows.Count != 0 ||
                 !TrackVisibleWindow(identities, windows, new IntPtr(410), 41, true) ||
                 RequireSingleWindow(windows, true) != new IntPtr(410) ||
                 TrackVisibleWindow(identities, windows, new IntPtr(411), 41, true))
                 throw new InvalidOperationException("Explicit PowerSI window selection changed.");
             Reject(() => RequireSingleWindow(windows, false), "SC_AMBIGUOUS_WINDOW");
+            WindowStateSelfTest();
             ResponsivenessSelfTest();
 
             using (var bitmap = new Bitmap(32, 24, PixelFormat.Format24bppRgb))
@@ -489,6 +540,51 @@ namespace RemoteMonitorLink
                     Reject(() => Parse("SC1|1|" + Convert.ToBase64String(png)), "SC_SIZE");
                 }
             }
+        }
+
+        private static void WindowStateSelfTest()
+        {
+            const uint noActivateTool = 0x08000080;
+            const uint popupVisible = 0x90000000;
+            using (var self = Process.GetCurrentProcess())
+            {
+                var identities = new Dictionary<int, long> { { self.Id, self.StartTime.ToUniversalTime().Ticks } };
+                foreach (bool minimized in new[] { false, true })
+                {
+                    var before = GetForegroundWindow();
+                    var window = CreateWindowEx(noActivateTool, "Static", "Owned window state check", popupVisible |
+                        (minimized ? 0x20000000u : 0), -32000, -32000, 320, 200,
+                        IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                    if (window == IntPtr.Zero) throw new InvalidOperationException("Window state fixture creation failed.");
+                    try
+                    {
+                        var metadata = WindowDiagnostic("selected", window);
+                        if (IsIconic(window) != minimized || !IsWindowDiagnostic(metadata) ||
+                            !metadata.Contains(" pid=" + self.Id + " ") ||
+                            !metadata.Contains(" iconic=" + (minimized ? "1" : "0") + " ") ||
+                            IsWindowDiagnostic(metadata + " title=private") || IsWindowDiagnostic("C:\\private\\text"))
+                            throw new InvalidOperationException("Native window state or metadata filtering failed.");
+                        var previousError = Console.Error;
+                        using (var closed = new StringWriter())
+                        {
+                            closed.Dispose();
+                            try { Console.SetError(closed); ReportWindow("selected", window); }
+                            finally { Console.SetError(previousError); }
+                        }
+                        IntPtr recorded = IntPtr.Zero;
+                        try
+                        {
+                            var selected = FindWindow(identities, candidate => recorded = candidate);
+                            if (minimized || selected != window) throw new InvalidOperationException("Wrong window state accepted.");
+                        }
+                        catch (InvalidDataException error) when (minimized && error.Message == "SC_MINIMIZED") { }
+                        if (recorded != window || GetForegroundWindow() != before)
+                            throw new InvalidOperationException("Selection failed to record its target or activated another window.");
+                    }
+                    finally { DestroyWindow(window); }
+                }
+            }
+            Console.WriteLine("PASS: PID-only selection amid unrelated windows; native minimized/non-minimized state, no activation on rejection");
         }
 
         private static void ResponsivenessSelfTest()
@@ -634,6 +730,9 @@ namespace RemoteMonitorLink
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+        [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(IntPtr window, int index);
         [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect rect);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect rect);

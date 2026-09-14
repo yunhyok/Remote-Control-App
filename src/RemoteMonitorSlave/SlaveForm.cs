@@ -469,9 +469,8 @@ namespace RemoteMonitorSlave
                 "PowerSI 크기 변경 없음. 응답 없음(PENDING)은 입력 없이 건너뜁니다. 내부 시뮬레이션 pending 판별은 미구현입니다.";
         }
 
-        // The Slave's own window can sit over the PowerSI Output pane; the worker's hit test would then abort with
-        // AUTO_COPY_OCCLUDED (the 2026-09-11 field result). Minimize ourselves and every open owned dialog while the
-        // worker runs, and put every window back afterwards, whatever the outcome.
+        // Called only AFTER the exact PowerSI window has been validated and activated. Never expose an
+        // unrelated background app merely because preparation failed. Only our own forms change state.
         private List<KeyValuePair<Form, FormWindowState>> MinimizeForAutoCopy()
         {
             var hidden = new List<KeyValuePair<Form, FormWindowState>>();
@@ -621,14 +620,19 @@ namespace RemoteMonitorSlave
                             ShowActivity(prefix + " / 창 확인 → Output 위치 찾기 → 자동 복사 → OCR");
                             PowerSiFrame frame;
                             PowerSiObservation located = null;
-                            var hidden = visionSettings.Enabled && visionSettings.AutoCopyEnabled ? MinimizeForAutoCopy() : null;
+                            bool autoCopy = visionSettings.Enabled && visionSettings.AutoCopyEnabled;
+                            List<KeyValuePair<Form, FormWindowState>> hidden = null;
                             try
                             {
-                                if (hidden != null) await Task.Delay(300, deadline.Token);
-                                frame = hidden != null
+                                frame = autoCopy
                                     ? await PowerSiScreenCapture.PrepareAsync(target, deadline.Token,
                                         detail => log.Write("OUTPUT_PREPARE", "pid=" + sample.Process.Pid + " " + detail))
                                     : await PowerSiScreenCapture.CaptureAsync(target, deadline.Token);
+                                if (autoCopy)
+                                {
+                                    hidden = MinimizeForAutoCopy();
+                                    await Task.Delay(300, deadline.Token);
+                                }
                                 sample.Buffer = await OutputBufferCapture.ReadAsync(target, deadline.Token);
                                 sample.ReceivedUtc = DateTime.UtcNow;
                                 // A timed-out text provider is not permission to try input against the same application.
@@ -636,7 +640,7 @@ namespace RemoteMonitorSlave
                                     sample.Buffer.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
                                     sample.Buffer.Code != "BUFFER_TIMEOUT" && sample.Buffer.Code != "BUFFER_WORKER_FAILED" &&
                                     sample.Buffer.Code != "BUFFER_SIZE" && sample.Buffer.Code != "BUFFER_TOO_LARGE";
-                                if (copyAllowed && hidden != null)
+                                if (copyAllowed && autoCopy)
                                 {
                                     located = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame, null, true);
                                     sample.Runs.Add(located);
@@ -755,6 +759,7 @@ namespace RemoteMonitorSlave
             powerSi.Text = "출처: " + result.Method + " / " + result.Code + " / " + result.CharacterCount.ToString(CultureInfo.InvariantCulture) +
                 "자 / " + result.LineCount.ToString(CultureInfo.InvariantCulture) + "줄 / LLM " + (vision?.Code ?? "대기 중") + "\r\n" +
                 (result.Code == "OUTPUT_VISIBLE_EMPTY" ? "보이는 Output 내용 없음 — 전체 버퍼 미확인, 클릭·복사·OCR 생략.\r\n" :
+                    result.Code == "SC_MINIMIZED" ? "선택된 PowerSI 창을 Windows가 최소화 상태로 보고하여 활성화·입력을 생략했습니다. 창이 열려 있었다면 진단 ZIP으로 식별값을 확인합니다.\r\n" :
                     result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
                     result.Method == "AUTO_CLIPBOARD" ? "자동 복사본 — 선택 해제 → 판독용 캡처 → Ctrl+A/C → 선택 해제. 클립보드가 바뀌었습니다.\r\n" :
                     result.Method == "PREVIOUS_CAPTURE" ? "이번 자동 복사 실패 — 이전 수집본을 참고용으로 유지합니다. 현재 화면보다 오래된 내용입니다.\r\n" :
@@ -1676,6 +1681,14 @@ namespace RemoteMonitorSlave
                     if (!comparisonLog.Contains("code=TRANSCRIPT_COMPARE summary=T1|2|1|1|0|0|0|1") ||
                         comparisonLog.Contains("860.000") || comparisonLog.Contains("마지막"))
                         throw new InvalidOperationException("Anchor/comparison logging lost its metadata or leaked Output text.");
+                    form.log.Write("OUTPUT_PREPARE", "pid=101 stage=selected hwnd=123 iconic=1 x=-32000 y=-32000");
+                    form.log.Write("OUTPUT_PREPARE", "title=private/path");
+                    var stateLog = File.ReadAllText(form.log.Path);
+                    if (!stateLog.Contains("iconic=1 x=-32000 y=-32000") || stateLog.Contains("private/path"))
+                        throw new InvalidOperationException("Signed native window metadata was lost or private text accepted.");
+                    form.RenderOutputBuffer(new OutputBufferResult { Code = "SC_MINIMIZED", Method = "NONE", Detail = "NONE" });
+                    if (!form.powerSi.Text.Contains("Windows가 최소화 상태로 보고") || !form.powerSi.Text.Contains("활성화·입력을 생략"))
+                        throw new InvalidOperationException("Minimized window diagnosis was not explained in the UI.");
                     var first = new OutputSample { Process = new ProcessState { Pid = 101, StartUtcTicks = 1001 }, SessionId = 1,
                         Buffer = copiedBuffer, Vision = anchorVision, ReceivedUtc = DateTime.UtcNow };
                     first.Runs.Add(anchorVision);

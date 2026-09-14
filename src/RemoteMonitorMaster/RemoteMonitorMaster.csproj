@@ -9,10 +9,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>RemoteMonitorMaster</AssemblyName>
     <RootNamespace>RemoteMonitorMaster</RootNamespace>
-    <Version>0.1.55</Version>
-    <AssemblyVersion>0.1.55.0</AssemblyVersion>
-    <FileVersion>0.1.55.0</FileVersion>
-    <InformationalVersion>0.1.55</InformationalVersion>
+    <Version>0.1.56</Version>
+    <AssemblyVersion>0.1.56.0</AssemblyVersion>
+    <FileVersion>0.1.56.0</FileVersion>
+    <InformationalVersion>0.1.56</InformationalVersion>
     <Company>Remote Monitor Master</Company>
     <Product>Remote Monitor Master</Product>
     <AssemblyTitle>Remote Monitor Master</AssemblyTitle>
