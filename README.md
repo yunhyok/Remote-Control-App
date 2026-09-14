@@ -1,11 +1,12 @@
-# Remote Monitor v0.1.57 — PowerSI 전경 전환 완료 확인
+# Remote Monitor v0.1.58 — PowerSI 수집 확인 및 HFSS 인계
 
 휴대폰 사내 KI-Messenger → Win7 Master → 사내망 Win11 Slave로 업무 PC의 상태를 확인하는 프로젝트입니다. 화면·원문 판독은 Slave와 **같은 PC의 loopback LM Studio / 로컬 모델**에서만 수행합니다. 진행률을 추측하지 않습니다.
 
-현재 시험은 **Slave만** 사용합니다. [현재 시험 방법](SLAVE-TEST.md), [목적·이력·개발 인수인계](HANDOFF.md)를 먼저 읽으세요.
+현재 시험은 **Slave만** 사용합니다. [현재 시험 방법](SLAVE-TEST.md), [목적·이력·개발 인수인계](HANDOFF.md)를 먼저 읽으세요. HFSS 새 task는 [HFSS 인계](HFSS-HANDOFF.md)를 추가로 읽습니다.
 
-## 이번 변경
+## 이번 정리와 기존 수집 동작
 
+- v0.1.57에서 두 PowerSI 전환·자동 전체 복사·빈 화면 구분·최신18줄 OCR을 현장 확인했습니다. v0.1.58은 다른 PID의 최근 복사 결과가 진단 설명에 섞이는 중복 문구만 제거합니다. 수집·입력·모델 경로는 바꾸지 않으며 같은 현장 시험을 다시 요구하지 않습니다.
 - v0.1.56에서 활성화 요청과 Windows 응답이 성공했는데 실제 창 전환보다 먼저 실패 처리된 경합을 수정합니다. 요청은 한 번만 보내고, 실제 전경 HWND가 목표와 같아질 때까지 최대1초·25ms 간격으로 읽기만 합니다. 이전 창/일시적인 전경 없음은 기다리며 제3의 창이 나타나면 즉시 중단합니다.
 - 활성화 확인이 끝난 시점의 창 상태와 경과 시간을 성공·실패 모두에 기록합니다. 무응답/목표 미도달 시간 초과/제3의 창 개입을 구분합니다. 최대화·복원·추가 클릭·강제 전환 재시도는 없습니다.
 - PowerSI의 대상 확인·전경 전환이 성공한 뒤에만 Slave를 잠시 최소화합니다. 준비 실패 때문에 뒤의 탐색기 등이 드러나는 순서를 없앴습니다. 전경 전환 한 번·제한된 Windows 응답 대기·정확한 대상 확인은 유지합니다.
@@ -17,7 +18,7 @@
 - OCR은 복사 worker의 **깨끗한 캡처 하단 최대256픽셀**을 사용합니다. 위치 모델을 다시 부르지 않습니다. 전체 복사 원문과 OCR 범위는 다릅니다.
 - 한 창이 실패하거나 시간 제한에 걸려도 다음 PID를 진행합니다. 결과 목록에서 PID를 선택해 비교하고 **진단 ZIP 한 번에 모든 PID 결과**를 저장합니다.
 
-**v0.1.57은 현장 미검증입니다.** v0.1.56 로그에서는 두 PowerSI 모두 정확한 PID/독립된 최상위 창·최소화 아님을 확인했지만 SC_FOREGROUND_WAIT_MISMATCH로 각각296/282ms에 중단됐습니다. 두 번째 대상 시작 때 첫 번째 PowerSI가 실제 전경이었던 기록이 있어, 첫 번째의 전환 완료보다 검사가 앞선 정황을 확인했습니다. 모델·복사 단계는 실행되지 않았습니다. 다른 앱을 닫거나 PowerSI를 수동 선택하는 우회 시험은 요구하지 않습니다.
+**v0.1.57 현장 확인:** Qwen3-VL-8B-Instruct Q4_K_M으로 두 PowerSI를 약17.6초에 처리했습니다. 내용 있는 창은95,672자/1,637줄 자동 복사, 빈 창은 OUTPUT_VISIBLE_EMPTY로 입력/OCR 생략했습니다. 하단 OCR18줄은 원문1619–1636행과 문자·숫자가 같고 공백 차이2줄만 있었습니다. 실제 OCR 이미지의 마지막 줄도 확인했습니다. 전체 버퍼 OCR이나 장기 무인 운용까지 검증한 것은 아닙니다. HFSS는 사용자의 별도 설명 후 새 task에서 진행합니다.
 
 ## Pending과 입력 경계
 
@@ -62,4 +63,4 @@ OUTPUT_BATCH_BEGIN/COMPLETE, OUTPUT_TARGET_BEGIN/END는 대상 PID·시작 시�
 
 .NET Framework4.8, Windows 빌드입니다. 개발자는 scripts/build-package.ps1로 양쪽 Release 빌드·실제 EXE 자체 검사·패키지를 검증합니다. 사용자는 SELF-TEST.cmd나 PowerShell이 필요 없습니다.
 
-CI workflow_dispatch의 새 release_tag로 GitHub Releases pre-release를 게시합니다. 현재 버전의 Slave-only ZIP은 Remote-Monitor-Slave-v0.1.57-win11-net48.zip이며 EXE/config/README/HANDOFF/SLAVE-TEST가 들어갑니다. 게시 상태·검증 근거·SHA256은 HANDOFF에서 확인합니다. 기존 태그나 자산은 덮어쓰지 않습니다. 이번에는 Slave만 교체하고 Master와 연결하지 않습니다.
+CI workflow_dispatch의 새 release_tag로 GitHub Releases pre-release를 게시합니다. 현재 버전의 Slave-only ZIP은 Remote-Monitor-Slave-v0.1.58-win11-net48.zip이며 EXE/config/README/HANDOFF/SLAVE-TEST가 들어갑니다. HFSS-HANDOFF.md는 저장소의 개발용 문서입니다. 게시 상태·검증 근거·SHA256은 HANDOFF에서 확인합니다. 기존 태그나 자산은 덮어쓰지 않습니다. Master 교체나 같은 PowerSI 현장 시험은 필요하지 않습니다.

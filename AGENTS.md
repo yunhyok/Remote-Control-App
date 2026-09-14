@@ -1,6 +1,7 @@
 # Remote Monitor contributor instructions
 
 - Read [HANDOFF.md](HANDOFF.md) before changing the project. It is the current state and next-work entry point; [PROJECT-REVIEW.md](PROJECT-REVIEW.md) is dated history.
+- For the separate HFSS task, also read [HFSS-HANDOFF.md](HFSS-HANDOFF.md), including the explicit skill/workflow handoff. HFSS details are deferred to the user's separate explanation; prepare only until then. Do not restart completed PowerSI field tests.
 - Current field testing is Slave-only. Do not repeat established Master/mobile transport tests without a relevant regression. Minimize human test steps and defer long waiting tests until the user can set up after work.
 - When field results reveal unfinished in-scope work, continue through diagnosis, the necessary fix, verification and the next test package without waiting for another "proceed". Respect an explicit diagnosis-only request or a new authorization boundary; do not invent unrelated next features.
 - Keep the application name and version visible. Preserve the Win7 Master / Win11 Slave boundary, .NET Framework 4.8 compatibility, and shared protocol checks.

@@ -968,7 +968,7 @@ namespace RemoteMonitorSlave
                 LogFilePath = log.Path,
                 AutoCopyFramePng = sample == null ? autoCopyFrame : sample.FailureFrame,
                 AutoCopyLastFailure = sample == null ? autoCopyFailure : sample.Failure,
-                Notes = "자동 복사 위치: 매번 자동 탐색" + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
+                Notes = "자동 복사 위치: 매번 자동 탐색" +
                     " / 자동 복사 설정: " +
                     (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + " / 전체 텍스트: " +
                     (buffer == null ? "없음" : buffer.Code + " " + buffer.Method + " " + buffer.Detail) +
@@ -1662,7 +1662,7 @@ namespace RemoteMonitorSlave
                         bundle.Runs[0].BodyDiagnostics != anchorVision.LocalBodyDiagnostics ||
                         !ReferenceEquals(bundle.AutoCopyFramePng, bodyFrame.Png) ||
                         bundle.AutoCopyLastFailure != "AUTO_COPY_OCCLUDED OCCLUDER|SELF" ||
-                        !bundle.Notes.Contains("최근 자동 복사: AUTO_COPY_OCCLUDED") ||
+                        bundle.Notes.Contains("최근 자동 복사:") ||
                         !bundle.Runs[0].Metadata.StartsWith("VISION_RUN") || !bundle.Runs[0].Metadata.Contains("frame=600x420") ||
                         !bundle.Runs[0].Metadata.Contains("body=B2|600|420") || bundle.Version != LinkVersion.Value)
                         throw new InvalidOperationException("Diagnostic bundle content lost the run, comparison or metadata.");
@@ -1754,6 +1754,12 @@ namespace RemoteMonitorSlave
                         batch.Targets[1].Runs[0].Transcript != null || !SlaveLog.ComparisonMetadata(emptyVision).Contains("visible_empty=1"))
                         throw new InvalidOperationException("Visible-empty evidence became full text, OCR success, or another PID's data.");
                     Console.WriteLine("PASS: visible-empty target stays distinct from full-buffer success and preserves the other PID");
+                    form.SelectOutputSample(first);
+                    batch = form.BuildExportContent(null);
+                    if (!batch.Targets[0].Notes.Contains("USER_COPY_READ") || batch.Targets[0].Notes.Contains("OUTPUT_VISIBLE_EMPTY") ||
+                        !batch.Targets[1].Notes.Contains("OUTPUT_VISIBLE_EMPTY") || batch.Targets[1].Notes.Contains("USER_COPY_READ"))
+                        throw new InvalidOperationException("Diagnostic notes inherited another selected target's result.");
+                    Console.WriteLine("PASS: per-PID diagnostic notes remain independent of the selected target");
                     var copyTime = first.ReceivedUtc;
                     RecordTargetFailure(first, "TARGET_TIMEOUT");
                     if (first.Buffer.Text != copiedBuffer.Text || first.ReceivedUtc != copyTime || first.Vision.LocalFailure != "TARGET_TIMEOUT" ||
