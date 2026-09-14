@@ -1,12 +1,12 @@
-# Remote Monitor Slave v0.1.56 — 다른 앱에 가려진 두 PowerSI 한 번에 시험
+# Remote Monitor Slave v0.1.57 — 두 PowerSI 전경 전환부터 자동 수집까지
 
-목표: **다른 앱이 함께 열린 환경에서 정확한 두 PowerSI를 선택·활성화하는지 확인**하고 원문/OCR 수집을 이어갑니다. v0.1.55는 두 창이 열려 있었다는 사용자 확인과 SC_MINIMIZED 기록이 불일치했습니다. 이번에는 준비 실패 시 Slave를 최소화하지 않으며, 선택된 HWND/PID/창 상태를 함께 기록합니다. Master·모바일·SELF-TEST·창 크기 반복 변경·장시간 대기는 제외합니다. 빈 Output에 일부러 내용을 만들지 마세요.
+목표: **실제 창 전환을 기다린 뒤 두 PowerSI의 원문/OCR 수집을 이어가는지 확인**합니다. v0.1.56은 정확한 창을 찾았으나 실제 전경 전환보다 앞서 실패한 정황이 있었습니다. 이번에는 단일 전환 요청 후 최대1초간 완료를 확인합니다. 준비 실패 시 Slave를 최소화하지 않으며, 실제 창 상태·실패 단계·경과 시간을 함께 기록합니다. Master·모바일·SELF-TEST·창 크기 반복 변경·장시간 대기는 제외합니다. 빈 Output에 일부러 내용을 만들지 마세요.
 
 ## 준비
 
 1. **기존 다른 앱들을 닫지 마세요.** 두 PowerSI는 기존 크기와 Output 상태를 유지하고 다른 앱에 가려져 있어도 됩니다. 미리 선택할 필요가 없습니다. 프로그램은 **최대화·복원·크기 변경을 하지 않습니다.** 실제 최소화된 창은 건너뜁니다.
 2. LM Studio에 Qwen3-VL-8B 모델을 로드하고 thinking OFF, 서버 ON 상태로 둡니다.
-3. 기존 Slave를 종료하고 새 EXE 제목의 v0.1.56을 확인합니다. LM Studio 설정에서 사용·자동 복사가 켜져 있고 모델이 선택돼 있는지 확인합니다. Slave 시작/연결파일은 필요 없습니다.
+3. 기존 Slave를 종료하고 새 EXE 제목의 v0.1.57을 확인합니다. LM Studio 설정에서 사용·자동 복사가 켜져 있고 모델이 선택돼 있는지 확인합니다. Slave 시작/연결파일은 필요 없습니다.
 
 ## 한 번 실행
 
@@ -20,7 +20,8 @@
 ## 중지·실패
 
 - Windows 응답 없음은 **SC_PENDING**으로 건너뛰고 다음 창을 진행합니다. 이는 내부 시뮬레이션 pending의 완전한 판별이 아닙니다. 위험 구간을 일부러 재현하는 시험은 요구하지 않습니다.
-- SC_FOREGROUND_REQUEST_REJECTED / SC_FOREGROUND_WAIT_PENDING / SC_FOREGROUND_*MISMATCH*: 전경 요청 거부 / 활성화 응답 대기 중 무응답 / 정확한 전경 창 불일치. 강제 입력으로 우회하지 않습니다.
+- SC_FOREGROUND_REQUEST_REJECTED / SC_FOREGROUND_WAIT_PENDING: 전경 요청 거부 / Windows 응답 대기 중 무응답.
+- SC_FOREGROUND_WAIT_TIMEOUT / SC_FOREGROUND_WAIT_MISMATCH: 실제 목표 창이1초 안에 전경이 되지 않음 / 대기 중 제3의 창이 나타남. 캡처 전후의 *MISMATCH*도 중단합니다. 강제 입력으로 우회하지 않습니다.
 - OUTPUT_VISIBLE_EMPTY: 화면의 확인된 본문이 비어 있어 입력·OCR을 생략함. 전체 버퍼·과거 로그가 없다는 뜻은 아닙니다.
 - SC_MINIMIZED: 선택한 창을 Windows가 최소화 상태로 보고함. 창이 열려 있었다면 수동 복원·반복 시험 대신 그대로 ZIP을 보내세요. HWND/PID·iconic·style_minimized·위치·전경 PID로 불일치를 확인합니다.
 - SC_AMBIGUOUS_WINDOW: 동일 PID에 여러 창이 있어 확정하지 못함.

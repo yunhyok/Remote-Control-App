@@ -31,13 +31,14 @@ namespace RemoteMonitorLink
         private const uint SmtoAbortIfHung = 0x0002;
         private const uint SmtoErrorOnExit = 0x0020;
         private const uint ResponsivenessMilliseconds = 750;
+        private const int ForegroundWaitMilliseconds = 1000;
         private const int MaxPngBytes = 8 * 1024 * 1024;
         private const int MaxWireChars = ((MaxPngBytes + 2) / 3) * 4 + 64;
         private static readonly string[] Errors = { "SC_IDENTITY", "SC_NOT_RUNNING", "SC_WINDOW_UNAVAILABLE",
             "SC_AMBIGUOUS_WINDOW", "SC_MINIMIZED", "SC_DESKTOP_UNAVAILABLE", "SC_CAPTURE_FAILED", "SC_BLANK",
             "SC_SIZE", "SC_WINDOW_CHANGED", "SC_PENDING", "SC_FOREGROUND_FAILED", "SC_TIMEOUT", "SC_WORKER_FAILED",
             "SC_INVALID_IMAGE", "SC_GATE_REJECTED", "SC_FOREGROUND_REQUEST_REJECTED", "SC_FOREGROUND_WAIT_PENDING",
-            "SC_FOREGROUND_WAIT_MISMATCH", "SC_FOREGROUND_MISMATCH_PRECAPTURE", "SC_FOREGROUND_MISMATCH_POSTCAPTURE" };
+            "SC_FOREGROUND_WAIT_MISMATCH", "SC_FOREGROUND_WAIT_TIMEOUT", "SC_FOREGROUND_MISMATCH_PRECAPTURE", "SC_FOREGROUND_MISMATCH_POSTCAPTURE" };
 
         internal static async Task<PowerSiFrame> CaptureAsync(ProcessInventory inventory, CancellationToken cancellation)
         {
@@ -164,8 +165,9 @@ namespace RemoteMonitorLink
             ReadGeometry(window, out windowRect, out clientRect);
             RequireResponsive(window); // Windows message responsiveness only; application-internal phases may remain busy.
             CheckUnchanged(args, window, windowRect, clientRect);
-            SetExactForeground(window);
-            ReportWindow("activated", window);
+            var activationClock = Stopwatch.StartNew();
+            try { SetExactForeground(window); }
+            finally { ReportWindow("activation_end", window, activationClock.ElapsedMilliseconds); }
             CheckUnchanged(args, window, windowRect, clientRect);
             RequireForeground(window, "SC_FOREGROUND_MISMATCH_PRECAPTURE");
             var frame = CaptureWindow(window);
@@ -195,10 +197,26 @@ namespace RemoteMonitorLink
 
         private static void SetExactForeground(IntPtr window)
         {
+            var previous = GetForegroundWindow();
             if (!SetForegroundWindow(window)) throw Failure("SC_FOREGROUND_REQUEST_REJECTED");
-            // Cross-input-queue activation completes asynchronously. WM_NULL is a bounded barrier behind that request.
+            // The v0.1.56 field trace became foreground after this response but after the old immediate check.
+            // A responsive message pump is necessary, not the final foreground observation.
             RequireResponsive(window, "SC_FOREGROUND_WAIT_PENDING");
-            RequireForeground(window, "SC_FOREGROUND_WAIT_MISMATCH");
+            WaitForExactForeground(window, previous);
+        }
+
+        private static void WaitForExactForeground(IntPtr window, IntPtr previous)
+        {
+            var clock = Stopwatch.StartNew();
+            while (true)
+            {
+                var current = GetForegroundWindow();
+                if (current == window) return;
+                // Null or the original foreground can be a transition; a third window is interference.
+                if (current != IntPtr.Zero && current != previous) throw Failure("SC_FOREGROUND_WAIT_MISMATCH");
+                if (clock.ElapsedMilliseconds >= ForegroundWaitMilliseconds) throw Failure("SC_FOREGROUND_WAIT_TIMEOUT");
+                Thread.Sleep(25); // Read-only polling in the killable worker, never another activation request or input.
+            }
         }
 
         private static void RequireForeground(IntPtr window, string failureCode)
@@ -280,9 +298,9 @@ namespace RemoteMonitorLink
         }
 
         // Numeric native metadata only: no window titles, paths, application text or screenshots in ordinary logs.
-        private static void ReportWindow(string stage, IntPtr window)
+        private static void ReportWindow(string stage, IntPtr window, long elapsedMilliseconds = 0)
         {
-            try { Console.Error.WriteLine(WindowDiagnostic(stage, window)); }
+            try { Console.Error.WriteLine(WindowDiagnostic(stage, window) + " elapsed_ms=" + elapsedMilliseconds.ToString(CultureInfo.InvariantCulture)); }
             catch { } // Best-effort diagnostics must not replace the target's actual result.
         }
 
@@ -311,7 +329,7 @@ namespace RemoteMonitorLink
         private static bool IsWindowDiagnostic(string line)
         {
             return line != null && line.Length <= 512 && System.Text.RegularExpressions.Regex.IsMatch(line,
-                @"\Astage=(selected|activated) hwnd=-?\d+ pid=\d+ root=-?\d+ owner=-?\d+ iconic=[01] style_minimized=[01] visible=[01] x=-?\d+ y=-?\d+ width=-?\d+ height=-?\d+ foreground_hwnd=-?\d+ foreground_pid=\d+\z");
+                @"\Astage=(selected|activated|activation_end) hwnd=-?\d+ pid=\d+ root=-?\d+ owner=-?\d+ iconic=[01] style_minimized=[01] visible=[01] x=-?\d+ y=-?\d+ width=-?\d+ height=-?\d+ foreground_hwnd=-?\d+ foreground_pid=\d+( elapsed_ms=\d+)?\z");
         }
 
         private static bool TrackVisibleWindow(Dictionary<int, long> identities, List<IntPtr> windows,
@@ -469,7 +487,7 @@ namespace RemoteMonitorLink
             Reject(() => Parse("SC_PENDING"), "SC_PENDING");
             Reject(() => Parse("SC_FOREGROUND_FAILED"), "SC_FOREGROUND_FAILED");
             foreach (var code in new[] { "SC_GATE_REJECTED", "SC_FOREGROUND_REQUEST_REJECTED",
-                "SC_FOREGROUND_WAIT_PENDING", "SC_FOREGROUND_WAIT_MISMATCH",
+                "SC_FOREGROUND_WAIT_PENDING", "SC_FOREGROUND_WAIT_MISMATCH", "SC_FOREGROUND_WAIT_TIMEOUT",
                 "SC_FOREGROUND_MISMATCH_PRECAPTURE", "SC_FOREGROUND_MISMATCH_POSTCAPTURE" })
                 Reject(() => Parse(code), code);
             Reject(() => Parse(new string('X', MaxWireChars + 1)), "SC_INVALID_IMAGE");
@@ -564,6 +582,8 @@ namespace RemoteMonitorLink
                             !metadata.Contains(" iconic=" + (minimized ? "1" : "0") + " ") ||
                             IsWindowDiagnostic(metadata + " title=private") || IsWindowDiagnostic("C:\\private\\text"))
                             throw new InvalidOperationException("Native window state or metadata filtering failed.");
+                        if (!IsWindowDiagnostic(WindowDiagnostic("activation_end", window) + " elapsed_ms=1000"))
+                            throw new InvalidOperationException("Activation-end metadata was rejected.");
                         var previousError = Console.Error;
                         using (var closed = new StringWriter())
                         {
@@ -587,6 +607,42 @@ namespace RemoteMonitorLink
             Console.WriteLine("PASS: PID-only selection amid unrelated windows; native minimized/non-minimized state, no activation on rejection");
         }
 
+        private static void ForegroundReadbackSelfTest(IntPtr first)
+        {
+            var second = CreateWindowEx(0x08000080, "Static", "Owned late readback check", 0x90000000,
+                -31600, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (second == IntPtr.Zero) throw new InvalidOperationException("Late readback fixture creation failed.");
+            try
+            {
+                Rect beforeWindow, beforeClient, afterWindow, afterClient;
+                ReadGeometry(second, out beforeWindow, out beforeClient);
+                RequireResponsive(second); // WM_NULL completes while first is still foreground.
+                using (var started = new ManualResetEvent(false))
+                {
+                    var waiting = Task.Run(() => { started.Set(); WaitForExactForeground(second, first); });
+                    if (!started.WaitOne(1000)) throw new InvalidOperationException("Readback check did not start.");
+                    Thread.Sleep(150);
+                    if (waiting.IsCompleted) throw new InvalidOperationException("Readback rejected the old foreground before the deadline.");
+                    if (!SetForegroundWindow(second)) throw new InvalidOperationException("Owned readback target was not activated.");
+                    if (!waiting.Wait(1500)) throw new InvalidOperationException("Readback did not observe late activation.");
+                    waiting.GetAwaiter().GetResult();
+                }
+                ReadGeometry(second, out afterWindow, out afterClient);
+                if (!SameRect(beforeWindow, afterWindow) || !SameRect(beforeClient, afterClient))
+                    throw new InvalidOperationException("Readback changed target geometry.");
+                var clock = Stopwatch.StartNew();
+                try { WaitForExactForeground(first, second); throw new InvalidOperationException("Never-activated target was accepted."); }
+                catch (InvalidDataException error) when (error.Message == "SC_FOREGROUND_WAIT_TIMEOUT") { }
+                if (clock.ElapsedMilliseconds < ForegroundWaitMilliseconds || clock.ElapsedMilliseconds > 2000)
+                    throw new InvalidOperationException("Readback timeout was not bounded.");
+                try { WaitForExactForeground(first, IntPtr.Zero); throw new InvalidOperationException("Third-party foreground was accepted."); }
+                catch (InvalidDataException error) when (error.Message == "SC_FOREGROUND_WAIT_MISMATCH") { }
+                SetExactForeground(first);
+                Console.WriteLine("PASS: native late foreground after responsive WM_NULL, bounded timeout and third-window rejection");
+            }
+            finally { DestroyWindow(second); }
+        }
+
         private static void ResponsivenessSelfTest()
         {
             const uint popupVisible = 0x80000000u | 0x10000000u;
@@ -604,6 +660,7 @@ namespace RemoteMonitorLink
                 // Exercise the real cross-input-queue delay when this self-test process has foreground rights.
                 if (SetForegroundWindow(first) && GetForegroundWindow() == first)
                 {
+                    ForegroundReadbackSelfTest(first);
                     IntPtr delayed = IntPtr.Zero;
                     Exception delayedError = null;
                     using (var ready = new ManualResetEvent(false))

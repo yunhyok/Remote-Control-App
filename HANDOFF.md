@@ -1,9 +1,11 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.56 대상 준비 후 Slave 최소화·창 식별 진단 / 로컬·CI·v0.1.56-rc1 게시 파일 검증 완료 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.57 실제 전경 도달 대기 / 로컬 검증 완료·CI/게시 대기 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
+- **v0.1.56 현장 ZIP remote-monitor-diag-20260914-070325-pid52576:** 두 PID 모두 SC_FOREGROUND_WAIT_MISMATCH(296/282ms), grant=true. PID78300/HWND11411010, PID134548/HWND5639998은 모두 독립 root, owner0, iconic0/style_minimized0, visible1, 창1936×1048이었다. 첫 창의 실패 이후 두 번째 selected 기록에서 첫 창의 정확한 HWND가 전경이었다. **정확한 창을 찾았으나 실제 전경 전환보다 앞서 검사를 끝낸 정황**이며 이번 최소화 판정 문제는 재현되지 않았다. 캡처·복사·모델은 미진입. 원문 ZIP은 Git에 넣지 않는다.
+- **v0.1.57:** SetForegroundWindow는 여전히1회. Windows 응답 확인 후 실제 목표 HWND를 최대1000ms/25ms 간격으로 읽는다. 이전 전경/일시적 null만 대기하고 제3의 창은 즉시 중단한다. activation_end에 성공·실패 모두 전경 상태/경과 시간을 기록한다. HWND/PID/시작 시각/세션/geometry/캡처 전후 검사는 유지하며 복원·최대화·크기 변경·강제 키/클릭·전환 재시도를 추가하지 않는다. 두 번째 PID의 입력 이후 권한 전환은 아직 현장 확인이 필요하다.
 - **v0.1.55 현장 ZIP remote-monitor-diag-20260914-063357-pid37196:** 두 PID(78300/134548) 모두 SC_MINIMIZED, 각각519/546ms, foreground grant=true. 활성화·캡처·모델 호출 전 중단이다. 사용자는 **두 PowerSI가 최소화되지 않고 다른 앱에 가려져 있었다고 확인**했다. 당시 HWND/창 상태가 기록되지 않아 이 불일치의 원인은 미확정이다. 탐색기를 대상으로 선택한 근거도 없다. 원문 ZIP/화면은 Git에 넣지 않는다.
 - **v0.1.56:** PrepareAsync가 정확한 PowerSI를 확인·활성화·캡처한 뒤에만 Slave를 최소화한다. 준비 실패 때문에 뒤의 다른 앱이 드러나던 순서를 제거한다. HWND/PID/root/owner/iconic/WS_MINIMIZE/사각형/전경 PID를 숫자만으로 기록하고 선택 직후 PID를 재확인한다. **이 변경이 최소화 판정 불일치까지 해결했다고 주장하지 않는다.** 다음은 다른 앱들을 그대로 열어 둔 두 PowerSI 한 번 수집이다.
 - 모바일 ↔ Win7 Master ↔ Win11 Slave의 정형 상태 왕복은 현장 확인했다. **현재는 Slave-only**, Master/mobile 시험을 반복하지 않는다.
@@ -82,6 +84,7 @@ Master는 **사람 목록이 붙은 통합 채팅창이 아닌 별도 개별 자
 | v0.1.54 | 최초 수동 선택 없는 복수 PID 수집·전경 전환만 허용·Windows 무응답 검사·PID별 결과와 ZIP | 검증·게시 후 현장에서 두 PID × 두 실행 모두 SC_FOREGROUND_FAILED. 새 자동 흐름 성공은 미확인 |
 | v0.1.55 | 전경 활성화 완료 동기화·단계별 실패 코드·빈 화면 관측과 원문 미확인 구분 | 로컬·CI·게시 파일 검증 완료. 내용 있는 창+빈 Output 한 번 수집이 현장 시험 |
 | v0.1.56 | 대상 준비 성공 뒤 Slave 최소화·숫자 기반 HWND/소유 PID/최소화/전경 상태 기록 | v0.1.55의 열린 창 관측 대 SC_MINIMIZED 불일치 조사. 다른 앱을 닫는 우회 없음 |
+| v0.1.57 | 단일 활성화 요청 뒤 실제 목표 전경 도달 대기·종료 시점 진단 | v0.1.56에서 첫 창은 실패 뒤 실제 활성화됨. 두 PID 전환부터 자동 수집까지 한 번 확인 |
 
 v0.1.33의 Slave `STATUS_SENT` 6회는 직접 상태 조회 1회와 모바일 5회를 합친 것이다. 모바일 답장 6회로 쓰지 않는다. 다섯 번째 성공 뒤 `STATUS_TARGET_CHANGED`는 다음 요청 대기 중의 안전 중단이며 앞선 5회 실패를 뜻하지 않는다. 상세 근거/당시 제한은 PROJECT-REVIEW의 해당 절에 있다.
 
@@ -162,15 +165,15 @@ v0.1.33의 Slave `STATUS_SENT` 6회는 직접 상태 조회 1회와 모바일 5�
 
 당시에는 Qwen3.6-35B-A3B Q8_0를 우선 후보로, Qwen3-VL-8B/30B-A3B-Instruct를 대안으로 검토했고 E4B·Gemma31B는 위치 오류/시간 초과 때문에 보류했다. OCR 전용 모델은 위치/OCR 모델 분리 기능이 필요할 수 있어 후속 후보였다. **현재 판단은 위 v0.1.52 결과가 우선**이며 과거 시간 초과만으로 모델을 영구 배제하지 않는다. 모델 이름·양자화는 코드에 고정하지 않는다. 당시 참고 출처는 [LM Studio Qwen3.6-35B-A3B](https://lmstudio.ai/models/qwen/qwen3.6-35b-a3b), [thinking 끄기 논의](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/discussions/12), [2026 로컬 VLM 비교](https://tinyweights.dev/posts/best-local-vision-language-models-2026/)다.
 
-## 6. 현재 수집 구현 (v0.1.56)
+## 6. 현재 수집 구현 (v0.1.57)
 
 SlaveForm.ReadOutputBuffer가 세션의 PowerSI 목록을 한 번 얻어 PID순으로 순차 처리한다. ProcessInventory의 기존128항목 상한 밖이면 누락 수를 표시한다. 각 대상은 원래 PID·시작 시각·세션이 고정된 singleton inventory로 처리하며 새로 생긴 PID는 다음 실행 대상이다. 다른 PowerSI가 존재해도 선택한 PID와 섞지 않는다. 같은 PID에 여러 visible window가 있으면 SC_AMBIGUOUS_WINDOW다.
 
 흐름: PrepareAsync(정확한 PID/창 확인, Windows 응답 확인, SetForegroundWindow만, 캡처) → **성공 후에만 자기 Slave 창 최소화** → 표준 전체 텍스트 직독 → 직독이 불가하면 Local LLM LOCATE_ONLY → 픽셀 본문 확정 → AnchorFromVision → 입력 worker의 새 본문/대상/응답 재검증 → 선택 해제 클릭/깨끗한 캡처/Ctrl+A/C/선택 정리 → ReframeOutput → 동일 로드 모델로 OCR1회 → 다음 PID. 준비 실패 시 Slave 자체 창도 건드리지 않는다. 성공 수집 뒤의 자기 창 복원과 다음 PID 순서는 유지한다.
 
-Prepare worker에 부모가 그 자식 PID만 foreground 권한을 허용하고 GO를 준다. OUTPUT_PREPARE 로그에는 PID와 권한 허용 결과를 남긴다. 전경 요청은 한 번뿐이며 요청 후 최대750ms WM_NULL 응답을 기다리고 정확한 전경 창을 확인한다. 요청 거부/동기화 대기/전경 불일치와 캡처 전후 검사를 SC_* 코드로 구분한다. 키·클릭·AttachThreadInput으로 우회하지 않는다. PowerSI ShowWindow/최대화/복원/resize는 없다. 최소화·잠금·세션 연결 해제는 실패다. [Microsoft의 비동기 전경 전환 설명](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745)이 수정 근거이며 고정 sleep으로 성공을 가정하지 않는다.
+Prepare worker에 부모가 그 자식 PID만 foreground 권한을 허용하고 GO를 준다. OUTPUT_PREPARE 로그에는 PID와 권한 허용 결과를 남긴다. 전경 요청은 한 번뿐이며 요청 후 최대750ms WM_NULL 응답을 확인한 뒤 **정확한 목표 HWND가 전경이 될 때까지 최대1000ms/25ms 간격으로 읽기만 한다**. 이전 전경 HWND와 일시적인 null은 전환 중으로 기다린다. 제3의 HWND는 SC_FOREGROUND_WAIT_MISMATCH, 목표 미도달은 SC_FOREGROUND_WAIT_TIMEOUT이다. 부모의4초 worker 상한/취소와 기존 요청 거부/무응답/캡처 전후 검사는 유지한다. 키·클릭·AttachThreadInput으로 우회하지 않는다. PowerSI ShowWindow/최대화/복원/resize는 없다. 최소화·잠금·세션 연결 해제는 실패다. [Microsoft의 비동기 전경 전환 설명](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745)을 참고하되 v0.1.56 현장에서는 WM_NULL 응답 직후 검사만으로 부족했으므로 실제 전경 도달을 추가 확인한다. 고정 시간 경과만으로 성공을 가정하지 않는다.
 
-v0.1.56은 선택 직후(최소화 거부 전) `stage=selected`, 전경 성공 후 `stage=activated`를 stderr로 전달한다. 4096자 상한/고정 숫자 필터를 적용하고 진단 실패는 실제 수집 결과를 대체하지 않는다. HWND·PID·root/owner·iconic·style_minimized·사각형·현재 전경 HWND/PID만 보존한다. 창 제목/프로젝트명은 읽거나 기록하지 않는다. `IsIconic`은 [Windows 최소화 여부 검사](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-isiconic)이며 다른 앱에 가려졌다는 이유만으로 true가 되는 API는 아니다. 사용자 관측과 다르면 새 식별 로그로 조사하고 검사를 무시하거나 자동 복원하지 않는다. 두 번째 PID의 foreground grant가 보장된다고 가정하지 않으며 실패 시 단계별 로그로 구별한다.
+v0.1.57은 선택 직후(최소화 거부 전) `stage=selected`, 전경 확인 종료 시 성공·실패 모두 `stage=activation_end`와 elapsed_ms를 stderr로 전달한다. 4096자 상한/고정 숫자 필터를 적용하고 진단 실패는 실제 수집 결과를 대체하지 않는다. HWND·PID·root/owner·iconic·style_minimized·사각형·현재 전경 HWND/PID·경과 시간만 보존한다. 창 제목/프로젝트명은 읽거나 기록하지 않는다. `IsIconic`은 [Windows 최소화 여부 검사](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-isiconic)이며 다른 앱에 가려졌다는 이유만으로 true가 되는 API는 아니다. 사용자 관측과 다르면 새 식별 로그로 조사하고 검사를 무시하거나 자동 복원하지 않는다. 두 번째 PID의 foreground grant가 보장된다고 가정하지 않으며 실패 시 단계별 로그로 구별한다.
 
 위치 모델과 기존 본문 경계 검사를 통과한 뒤 **본문 모든 픽셀이 동일한 무채색일 때만** LocalVisibleEmpty를 설정한다. 가장자리의 한 픽셀·커서·무늬라도 다르면 이 판정을 하지 않는다. OUTPUT_VISIBLE_EMPTY는 로컬 결과이며 Text=null/전체 버퍼 미확인, 이미지 보존, 클릭·복사·OCR/같은 이미지 재판독 생략이다. PS2 wire 계약은 그대로다. 새 clipboard가 없다는 사실만으로 빈 버퍼라고 판정하지 않는다. 빈 것으로 확정되지 않는 커스텀 화면은 기존 수집 실패/미확인 결과를 유지한다.
 
@@ -196,7 +199,7 @@ OUTPUT_BATCH_BEGIN/COMPLETE, OUTPUT_TARGET_BEGIN/END(pid/start/code/elapsed_ms),
 
 ## 7. 다음 현장 시험과 후속 과제
 
-[SLAVE-TEST.md](SLAVE-TEST.md)의 두 창 한 번 수집이 기준이다. **다른 앱들을 닫지 않고**, 내용 있는 PowerSI와 빈 Output의 기존 상태·크기를 유지한다. 다른 앱에 가려져 있어도 미리 선택하지 않는다. Qwen3-VL8B thinking OFF로 **새 화면 두 방식 비교** 한 번 실행한다. 최초 수동 복사 없음. 각 PID의 활성화/원문/OCR 또는 실패 결과를 진단 ZIP 하나로 전달한다. 창이 열려 있었는데 SC_MINIMIZED가 반복되면 새 selected 메타데이터를 우선 조사한다. 빈 창에 로그를 만들거나 반복 시험으로 보충할 필요는 없다.
+[SLAVE-TEST.md](SLAVE-TEST.md)의 두 창 한 번 수집이 기준이다. **다른 앱들을 닫지 않고**, 내용 있는 PowerSI와 빈 Output의 기존 상태·크기를 유지한다. 다른 앱에 가려져 있어도 미리 선택하지 않는다. Qwen3-VL8B thinking OFF로 **새 화면 두 방식 비교** 한 번 실행한다. 최초 수동 복사 없음. 각 PID의 실제 전환/원문/OCR 또는 실패 결과를 진단 ZIP 하나로 전달한다. grant/selected/activation_end의 전경 HWND·PID와 경과 시간으로 전환 실패를 구분한다. 빈 창에 로그를 만들거나 반복 시험으로 보충할 필요는 없다.
 
 내부 pending 판별과 무입력 관측, HFSS/다른 앱, 모바일 발췌문 전달/복수 PID 계약, 장기 대기/복구는 후속이다. 현재 시험에서 pending 위험 구간이나 crash를 일부러 재현하라고 요청하지 않는다. 범용 플러그인 틀이나 임의 제어 명령은 만들지 않는다.
 
@@ -237,13 +240,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build-package.ps
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build-package.ps1 -SlaveOnly
 ```
 
-스크립트는 각 대상 restore/build Release → 실제 EXE `--self-test` → 종료 코드 확인 → ZIP/SHA256 생성을 한다. 자체 검사에는 모의 loopback 서버, 프로토콜/인증/모델 응답/픽셀/재판독/취소/UI 상태 검사 등이 있다. 실사용 앱 창에 입력하는 시험과 구분한다. `dist/verification-v0.1.56/`의 stdout/stderr로 결과를 확인한다. 필요한 변경이 있을 때만 기존 추가 개발용 `scripts/test-powersi-capture.ps1`, `test-powersi-discovery.ps1` 등을 실행한다. `test-layout-replay.ps1`은 별도 현장 로그가 필요한 과거 KI 재현용이며 일반 빌드 필수조건이 아니다.
+스크립트는 각 대상 restore/build Release → 실제 EXE `--self-test` → 종료 코드 확인 → ZIP/SHA256 생성을 한다. 자체 검사에는 모의 loopback 서버, 프로토콜/인증/모델 응답/픽셀/재판독/취소/UI 상태 검사 등이 있다. 실사용 앱 창에 입력하는 시험과 구분한다. `dist/verification-v0.1.57/`의 stdout/stderr로 결과를 확인한다. 필요한 변경이 있을 때만 기존 추가 개발용 `scripts/test-powersi-capture.ps1`, `test-powersi-discovery.ps1` 등을 실행한다. `test-layout-replay.ps1`은 별도 현장 로그가 필요한 과거 KI 재현용이며 일반 빌드 필수조건이 아니다.
 
 ### GitHub Actions로 배포물 만들기 (v0.1.49-rc1부터)
 
 push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--self-test`를 수행하고 자체 검사 stdout/stderr를 로그와 아티팩트에 남긴다. 아티팩트는 GitHub 로그인이 있어야 내려받을 수 있으므로 사용자 전달용이 아니다. 사용자 전달용 배포물은 다음 절차로 만든다.
 
-1. GitHub → Actions → CI → **Run workflow**. 브랜치를 고르고 `release_tag`에 태그(예: `v0.1.56-rc1`)를 입력한다.
+1. GitHub → Actions → CI → **Run workflow**. 브랜치를 고르고 `release_tag`에 태그(예: `v0.1.57-rc1`)를 입력한다.
 2. `release` job이 해당 커밋에서 전체 및 Slave-only 패키지를 빌드·자체 검사한다. 태그는 **소스 버전과 같은 `v<버전>-rc<양의 정수>`의 새 이름**이어야 한다. 기존 원격 태그/Release나 조회 오류는 실패 처리한다. 정확한 workflow SHA에 태그를 원자적으로 생성한 뒤 **현재 버전 두 ZIP과 SHA256SUMS.txt만** pre-release에 올린다. 덮어쓰기는 없다. 태그 생성 후 게시가 실패해도 같은 태그를 재사용하지 말고 새 rc 번호를 쓴다.
 3. 사용자에게는 Slave-only ZIP의 직접 링크와 SHA256을 전달한다. 링크 형식: `https://github.com/yunhyok/Remote-Control-App/releases/download/<태그>/Remote-Monitor-Slave-<버전>-win11-net48.zip`. 로그인 없이 열린다.
 
@@ -274,11 +277,13 @@ v0.1.50-rc1은 이번 현장 시험 대상에서 제외했다. v0.1.51-rc1은 �
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-comparison-layout.ps1 -ExecutablePath src\RemoteMonitorSlave\bin\Release\net48\RemoteMonitorSlave.exe -OutputDirectory dist\comparison-layout -Comparison -OcrReplay
 ```
 
-패키지: 전체는 `dist/Remote-Monitor-v0.1.56-win7-win11-net48.zip`, Slave-only는 `dist/Remote-Monitor-Slave-v0.1.56-win11-net48.zip`. EXE/config를 함께 둔다. 프로그램명/버전은 제목 표시줄에서 확인한다. Master 연결 재개 시 양쪽 버전을 맞추며 **이번 시험에서는 기존 Master를 바꾸거나 연결하지 않는다.**
+패키지: 전체는 `dist/Remote-Monitor-v0.1.57-win7-win11-net48.zip`, Slave-only는 `dist/Remote-Monitor-Slave-v0.1.57-win11-net48.zip`. EXE/config를 함께 둔다. 프로그램명/버전은 제목 표시줄에서 확인한다. Master 연결 재개 시 양쪽 버전을 맞추며 **이번 시험에서는 기존 Master를 바꾸거나 연결하지 않는다.**
 
 현재 현장 절차는 SLAVE-TEST가 기준이다. 두 PowerSI 자동 수집1회 / 최초 수동 복사 없음 / 최대화·복원·크기 변경 없음 / PID별 결과 확인 / 진단 ZIP 하나 저장이다.
 
 ## 10. 검증 범위와 저장 정책
+
+**v0.1.57 로컬 검증 완료:** 양쪽 Windows Release 빌드 경고/오류0 및 실제 EXE 자체 검사 통과. 전경 판독을150ms 늦추는 소유 창 검사,1000ms 시간 초과, 제3의 창 거부, geometry 불변, 종료 단계 진단 필터, 새 오류 코드 검사를 추가했다. 새 지연 판독/기존 교차 큐/실제 입력 검사는 로컬 전경 권한이 없어 SKIP였으므로 통과했다고 간주하지 않는다. 독립 검토에서 출시 차단 문제는 없었다. CI에서 실제 소유 창 검사와 게시 파일 검증을 이어간다. 실제 PowerSI 수집 성공 및 첫 수집 뒤 두 번째 대상의 foreground 권한은 현장 미검증이다.
 
 **v0.1.56 검증/게시 완료:** Windows 양쪽 Release 경고/오류0 및 실제 EXE 자체 검사를 통과했다. 다른 PID 100개를 제외하는 선택 검사, 소유한 no-activate 실제 창의 최소화/비최소화 판정·네이티브 열거·거부 시 전경 불변, 숫자 진단 필터·음수 좌표 보존·UI 설명을 확인했다. 로컬 교차 큐 활성화/실제 마우스·키 입력은 전경 환경이 없어 SKIP했다. 독립 검토에서 순서 변경은 적절하지만 SC_MINIMIZED 관측 불일치의 확정 원인은 아니라는 점과, 진단 IO 실패가 실제 결과를 바꾸지 않도록 보완할 점을 확인했다. 후자를 수정하고 닫힌 진단 스트림 검사를 추가한 최종 소스로 양쪽 빌드/EXE 자체 검사를 다시 통과했다. [최종 소스 배포 CI 34815428056](https://github.com/yunhyok/Remote-Control-App/actions/runs/34815428056)은 build/release 모두 성공했다. build job `103884998319`에서 새 창 상태 검사·교차 큐 전경 완료·소유 TextBox의 실제 클릭/Ctrl+A/C/선택 해제/반복 복사와 PID별 결과 검사가 모두 PASS였다. 회사 PowerSI 두 개를 재현한 시험은 아니며 현장 검증을 대체하지 않는다.
 
@@ -336,4 +341,4 @@ Master는 연결 파일/붙여넣기 값을 메모리에 유지한다. 두 프�
 
 ## 11. 다음 서비스 시작 안내
 
-HANDOFF.md와 SLAVE-TEST.md를 현재 기준으로 읽고 PROJECT-REVIEW.md는 이력으로 취급한다. v0.1.56의 다른 앱에 가려진 두 PowerSI 시험 결과를 먼저 확인한다. 열린 창에 SC_MINIMIZED가 반복되면 HWND/소유 PID/Windows 상태를 읽어 원인을 구분하고, 최소화 검사를 무시하는 우회는 하지 않는다. 현장 결과에서 미완료 문제가 드러나면 필요한 수정·검증·다음 시험판까지 별도 진행 요청 없이 계속한다. 최대화·복원·크기 변경 금지, 최초 수동 복사 제거, 모든 PID 결과 분리, Windows 무응답 입력 금지와 내부 pending 미판별 한계를 유지한다. PowerSI가 끝나면 HFSS와 모바일 발췌문 계약을 별도 설계한다. 현장 데이터를 Git/외부 모델에 올리지 않는다. 게시 상태는 최신 CI/Release를 확인하고 새 immutable rc로만 전달한다.
+HANDOFF.md와 SLAVE-TEST.md를 현재 기준으로 읽고 PROJECT-REVIEW.md는 이력으로 취급한다. v0.1.57의 두 PowerSI 전환/수집 결과를 먼저 확인한다. grant/selected/activation_end와 경과 시간을 읽어 대상 판정·무응답·목표 미도달·제3의 창 개입을 구별한다. 현장 결과에서 미완료 문제가 드러나면 필요한 수정·검증·다음 시험판까지 별도 진행 요청 없이 계속한다. 최대화·복원·크기 변경 금지, 최초 수동 복사 제거, 모든 PID 결과 분리, Windows 무응답 입력 금지와 내부 pending 미판별 한계를 유지한다. PowerSI가 끝나면 HFSS와 모바일 발췌문 계약을 별도 설계한다. 현장 데이터를 Git/외부 모델에 올리지 않는다. 게시 상태는 최신 CI/Release를 확인하고 새 immutable rc로만 전달한다.
