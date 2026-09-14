@@ -1,8 +1,8 @@
 # Remote Monitor — 다른 개발 에이전트를 위한 인수인계
 
-기준: **2026-09-14, v0.1.52 모델 비교 시험판 준비**. v0.1.51 현장 결과를 반영해 OCR 입력의 모든 줄을 전사하고, 사용자가 여러 모델의 thinking을 끈 상태로 동일 이미지를 비교하는 단계다. Claude 등 다른 서비스가 원래 대화를 읽지 않아도 이어서 작업하기 위한 문서다. 저장소 `yunhyok/Remote-Control-App`은 사용자 승인으로 **Public**이다. 개발을 처음부터 재시작하지 않는다.
+기준: **2026-09-14, v0.1.52 모델 비교 시험판 게시 완료**. v0.1.51 현장 결과를 반영해 OCR 입력의 모든 줄을 전사하고, 사용자가 여러 모델의 thinking을 끈 상태로 동일 이미지를 비교하는 단계다. Claude 등 다른 서비스가 원래 대화를 읽지 않아도 이어서 작업하기 위한 문서다. 저장소 `yunhyok/Remote-Control-App`은 사용자 승인으로 **Public**이다. 개발을 처음부터 재시작하지 않는다.
 
-**직전 게시 확인:** [v0.1.51-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.51-rc1), 소스 `943f6adfc77ab9ca161b34781d3a10b9eb996187` ([PR #3](https://github.com/yunhyok/Remote-Control-App/pull/3)). **v0.1.52 로컬 개발 검증은 통과했고 CI/새 pre-release는 준비 중**이다(§10). 이 문서의 아래 v0.1.49/50 병합 기록과 구분한다.
+**게시 확인:** [v0.1.52-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.52-rc1), 소스 `e7a1989943432aefbfcbaf9394a69fc18b77261f`. [배포 CI](https://github.com/yunhyok/Remote-Control-App/actions/runs/34797117891)의 build/release 성공, 익명 다운로드와 두 ZIP 해시를 확인했다(§9/§10). 소스와 사후 검증 기록은 `codex/slave-v0.1.51-guarded-copy` / [PR #3](https://github.com/yunhyok/Remote-Control-App/pull/3)에 있으며 아직 main에 병합하지 않았다. 게시 파일/태그를 덮어쓰지 않고 검증 기록만 후속 문서 커밋으로 남겼다.
 
 ## 1. 지금 이어받을 상태
 
@@ -290,6 +290,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.52-rc1` | `e7a1989` | `Remote-Monitor-Slave-v0.1.52-win11-net48.zip` | `39527E0943C732BDCA57C1BDF9A75A6FED6CCB396009CFEF3203A888DC8E50A8` |
+| | | `Remote-Monitor-v0.1.52-win7-win11-net48.zip` | `200F25B55E3D34FAA8BC82D87DEAE865398C0A833FB5F789F985DE99059AF38F` |
 | `v0.1.51-rc1` | `943f6ad` | `Remote-Monitor-Slave-v0.1.51-win11-net48.zip` | `D5734D66FF01898F160E204D24F0B8F07090394B060ECFA669CD1FD41107A968` |
 | | | `Remote-Monitor-v0.1.51-win7-win11-net48.zip` | `1E794ED3C93A8B3DF6970142FCBF1D4B8BA76C72BEDB604B06520F63EE65FEE0` |
 | `v0.1.50-rc1` | `d8249bf` (main에 병합됨) | `Remote-Monitor-Slave-v0.1.50-win11-net48.zip` | `2AC2821627418CB65CA07FEC305BF4D5A4846BB1ECD00CD2040B4566133A8D76` |
@@ -311,7 +313,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.52 로컬 검증:** Windows 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE `--self-test` 종료0. 기존 취소·입력 전 본문 검사·11항목 진단 묶음·UI 검사와 변경된 전사 정책 검사가 통과했다. 실제 입력 검사는 대화형 전경이 없어 SKIP했다. 합성 자료를 넣은 실제 비교 Form의 기본 이미지 선택값/표시와 오프스크린 렌더링도 확인했다. 독립 검토에서 출시 차단 문제는 없었다. **CI/새 pre-release 게시는 대기 중이며 실제 모델의 전사 완전성·다중 모델 비교는 현장 미검증**이다. `transcript_policy=ALL_VISIBLE_V1 thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=4096`은 요청 메타데이터이지 실제 모델의 정확도나 thinking 적용 인증이 아니다.
+**v0.1.52 검증:** Windows 로컬 및 [배포 CI 34797117891](https://github.com/yunhyok/Remote-Control-App/actions/runs/34797117891) 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE `--self-test` 통과. 합성18줄/2000자 초과/반복·빈 줄·Unicode 보존, 마지막 행까지의 재판독 결과, 미완료 응답 거부, 동일 PNG 및 thinking OFF 요청 검사와 기존 취소·입력 전 본문 검사·11항목 진단 묶음·UI 검사를 포함한다. 실제 입력 검사는 로컬에서 전경이 없어 SKIP했으나 CI의 소유 시험 창에서는 `PASS: live input test (click + Ctrl+A + Ctrl+C)`였다. 합성 자료를 넣은 실제 비교 Form의 기본 이미지 선택값/표시와 오프스크린 렌더링도 확인했다. 독립 검토에서 출시 차단 문제는 없었다. **실제 모델의 전사 완전성·다중 모델 비교는 현장 미검증**이다. `transcript_policy=ALL_VISIBLE_V1 thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=4096`은 요청 메타데이터이지 실제 모델의 정확도나 thinking 적용 인증이 아니다.
+
+**v0.1.52 게시 파일 확인:** 태그는 정확히 `e7a1989943432aefbfcbaf9394a69fc18b77261f`를 가리킨다. 두 ZIP을 인증 헤더 없이 내려받아 Release API digest 및 SHA256SUMS.txt와 대조했다. Slave ZIP은 EXE/config/README/HANDOFF/SLAVE-TEST 5개 파일, EXE FileVersion `0.1.52.0`, ProductVersion 소스 접미사 `e7a1989943432aefbfcbaf9394a69fc18b77261f`다. 게시 EXE 내부의 `ALL_VISIBLE_V1` 및 모든 행 전사 프롬프트도 확인했다. ZIP 안 HANDOFF의 CI 대기 문구는 게시 전 소스 시점 기록이며 이 후속 문서가 최종 게시 검증 기록이다.
 
 **v0.1.51 검증:** 로컬 Windows 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사 통과. 입력 전 정상/이동/선택 강조/취소, stdin EOF 협력 정리, 이전 원문 참고용 보존, 실제 전사 행/응답 형식 표시, UI/진단 묶음 검사를 포함한다. 실제 입력 시험은 로컬 전경이 없어 SKIP했지만, 최종 소스 `943f6ad`의 [배포 CI 34793626986](https://github.com/yunhyok/Remote-Control-App/actions/runs/34793626986)은 build/release 모두 성공했다. build job stdout에서 `PASS: live input test (click + Ctrl+A + Ctrl+C)`까지 확인했다. 이는 러너의 소유 시험 창에서 정확한 클립보드 텍스트를 얻은 검사이며, EOF 취소 검사는 실제 입력 없는 별도 worker 정리 검사다. **실제 PowerSI의 자동 복사·입력 도중 Stop·선택 강조 상태 지원·전사 정확도는 현장 미검증**이다. 배포 태그/파일은 바꾸지 않고 이 사후 검증 기록만 문서 커밋으로 추가했다.
 
