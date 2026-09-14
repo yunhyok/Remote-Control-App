@@ -480,7 +480,7 @@ namespace RemoteMonitorSlave
                     BodySearchDiagnostics search;
                     var body = OutputPaneImage.FindBodyAt(frame, sampled.ClientPoint, CancellationToken.None, out search);
                     diagnostics = search == null ? "NONE" : search.Summary();
-                    sampled.Body = body; // The worker clicks this body's centre and re-verifies it after the click.
+                    sampled.Body = body; // The worker must re-verify this body before touching input.
                     learnedAnchor = sampled;
                     pendingAnchor = null;
                     try { log.Write("OUTPUT_ANCHOR_LEARNED", "anchor=" + sampled.Serialize() + " body=" + BoxText(body) + " diag=" + LogValue(diagnostics)); }
@@ -506,7 +506,7 @@ namespace RemoteMonitorSlave
         {
             anchorState.Text = "자동 복사 위치: " + AnchorStateText() + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
                 " / 자동 복사 설정: " + (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + Environment.NewLine +
-                "수동 복사 한 번으로 위치를 배우고 같은 실행의 화면에서 다시 확인합니다. 자동 복사 동안 이 창은 잠시 최소화되며 위치는 메모리에만 둡니다.";
+                "복사 후 선택 강조를 해제해야 다음 자동 복사가 가능할 수 있습니다(연속 무인 복사 미완료). 실패하면 수동 복사를 다시 요구하지 않습니다.";
         }
 
         // The Slave's own window can sit over the PowerSI Output pane; the worker's hit test would then abort with
@@ -582,12 +582,15 @@ namespace RemoteMonitorSlave
             var cancellation = new CancellationTokenSource();
             cancellation.CancelAfter(PowerSiVision.RequestDeadlineMilliseconds); // Allow the 100s vision deadline to return its crop/error before outer cancellation.
             snapshotCancellation = cancellation;
+            var previousBuffer = lastBuffer;
+            var previousReceivedUtc = lastBufferReceivedUtc;
             ClearPowerSi();
             uint clipboardBaseline = OutputBufferCapture.ClipboardSequence;
             var clock = Stopwatch.StartNew();
             ShowActivity("LLM 화면 판독 + Output 전체 텍스트 수집 시작 / Stop 가능");
             UpdateButtons();
             Task<PowerSiObservation> visionTask = null;
+            bool automaticAttempted = false;
             string visionStage = "캡처 준비";
             var visionProgress = new Progress<string>(stage =>
             {
@@ -614,14 +617,15 @@ namespace RemoteMonitorSlave
                     var anchor = visionSettings.AutoCopyEnabled ? MatchingAnchor(inventory) : null;
                     if (anchor != null)
                     {
+                        automaticAttempted = true;
                         log.Write("OUTPUT_AUTO_COPY_BEGIN", "self_hidden=1");
-                        ShowActivity("학습한 Output 위치로 자동 복사 중 — 이 창을 잠시 최소화합니다. 마우스·키보드를 건드리지 마세요 (최대8초) / Stop 가능");
+                        ShowActivity("학습한 Output 위치로 자동 복사 중 — 이 창을 잠시 최소화합니다. 마우스·키보드를 건드리지 마세요 (8초 + 정리 최대1초) / Stop 가능");
                         OutputBufferResult automatic;
                         var hidden = MinimizeForAutoCopy();
                         try
                         {
                             await Task.Delay(300, cancellation.Token); // Let the minimize reach the desktop before the hit test.
-                            automatic = await OutputAutoCopy.AutoCopyAsync(inventory, anchor, clipboardBaseline, cancellation.Token);
+                            automatic = await OutputAutoCopy.AutoCopyAsync(inventory, anchor, cancellation.Token);
                         }
                         finally { RestoreAfterAutoCopy(hidden); }
                         cancellation.Token.ThrowIfCancellationRequested();
@@ -635,6 +639,10 @@ namespace RemoteMonitorSlave
                         }
                         else
                         {
+                            // Keep this failed automatic result and finish the vision comparison. Do not ask the
+                            // user to repeat manual copying or wait another 30 seconds for the same field test.
+                            result = PreviousReference(automatic, previousBuffer);
+                            bufferReceivedUtc = result.Method == "PREVIOUS_CAPTURE" ? previousReceivedUtc : DateTime.UtcNow;
                             log.Write("OUTPUT_AUTO_COPY_FAILED", "code=" + LogValue(automatic.Code) + " detail=" + LogValue(automatic.Detail));
                             // Keep the worker's own capture of the abort (last one only) for the diagnostic bundle.
                             var abortedFrame = OutputAutoCopy.FrameOf(automatic);
@@ -643,13 +651,11 @@ namespace RemoteMonitorSlave
                                 autoCopyFrame = abortedFrame;
                                 autoCopyFailure = automatic.Code + " " + automatic.Detail;
                             }
-                            // A failed attempt may still have changed the clipboard; the manual wait must not accept it.
-                            clipboardBaseline = OutputBufferCapture.ClipboardSequence;
                         }
                         UpdateAnchorState();
                     }
                 }
-                if (result.Text == null && result.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
+                if (!automaticAttempted && result.Text == null && result.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
                     result.Code != "BUFFER_TIMEOUT" && result.Code != "BUFFER_SIZE" && result.Code != "BUFFER_TOO_LARGE" && result.Code != "BUFFER_WORKER_FAILED")
                 {
                     // One guided same-run fallback; this path generates no input and does not change the clipboard.
@@ -732,6 +738,14 @@ namespace RemoteMonitorSlave
             }
         }
 
+        private static OutputBufferResult PreviousReference(OutputBufferResult failure, OutputBufferResult previous)
+        {
+            if (previous?.Text == null) return failure;
+            // Keep failure authoritative. This is an older reference, never a successful automatic capture.
+            return new OutputBufferResult { Code = failure.Code, Method = "PREVIOUS_CAPTURE", Detail = failure.Detail,
+                Text = previous.Text, CharacterCount = previous.CharacterCount, LineCount = previous.LineCount };
+        }
+
         private void RenderOutputBuffer(OutputBufferResult result, PowerSiObservation vision = null, DateTime? receivedUtc = null)
         {
             if (vision == null || !ReferenceEquals(lastBuffer, result) || !ReferenceEquals(lastObservation?.LocalFrame, vision.LocalFrame))
@@ -753,6 +767,7 @@ namespace RemoteMonitorSlave
                 "자 / " + result.LineCount.ToString(CultureInfo.InvariantCulture) + "줄 / LLM " + (vision?.Code ?? "대기 중") + "\r\n" +
                 (result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
                     result.Method == "AUTO_CLIPBOARD" ? "자동 복사본 — 학습한 위치를 다시 확인한 뒤 클릭·Ctrl+A·Ctrl+C를 한 번 실행했습니다. 클립보드가 바뀌었습니다.\r\n" :
+                    result.Method == "PREVIOUS_CAPTURE" ? "이번 자동 복사 실패 — 이전 수집본을 참고용으로 유지합니다. 현재 화면보다 오래된 내용입니다.\r\n" :
                     "컨트롤이 현재 보유한 텍스트입니다. 과거에 버린 로그까지 복원하는 것은 아닙니다.\r\n") +
                 (result.Text == null ? "미수집: " + result.Detail :
                     (result.Text.Length > 4000 ? "[아래는 끝부분 미리보기 — 결과 비교 보기에서 전체 확인]\r\n" + result.Text.Substring(result.Text.Length - 4000) : result.Text));
@@ -905,17 +920,15 @@ namespace RemoteMonitorSlave
             var evidence = run == null ? null : run.LocalEvidence;
             if (string.IsNullOrEmpty(evidence)) return null;
             var lines = evidence.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
-            int start = 0;
-            while (start < lines.Length && IsEvidenceHeader(lines[start])) start++;
+            // Strip only our two known envelopes, never arbitrary bracket-prefixed log text.
+            int start = lines.Length >= 2 && lines[0] == "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]" &&
+                lines[1].StartsWith("캡처 UTC ", StringComparison.Ordinal) ? 2 :
+                lines.Length >= 3 && lines[0] == "[UNVALIDATED LM STUDIO RESPONSE — NOT USED AS SIMULATION STATUS]" &&
+                lines[1].StartsWith("Local failure: ", StringComparison.Ordinal) &&
+                lines[2] == "Slave 내부 확인용. 원문은 로그/메신저로 보내지 않습니다." ? 3 : 0;
             if (start >= lines.Length) return null;
             var transcript = string.Join("\r\n", lines, start, lines.Length - start);
             return string.IsNullOrWhiteSpace(transcript) ? null : transcript;
-        }
-
-        private static bool IsEvidenceHeader(string line)
-        {
-            return line.StartsWith("[", StringComparison.Ordinal) || line.StartsWith("캡처 UTC ", StringComparison.Ordinal) ||
-                line.StartsWith("Local failure: ", StringComparison.Ordinal) || line.StartsWith("Slave 내부", StringComparison.Ordinal);
         }
 
         // Rendered once per run and kept for the bundle. Only the T1 counters reach the log.
@@ -949,6 +962,7 @@ namespace RemoteMonitorSlave
                 BufferCode = buffer == null ? null : buffer.Code,
                 BufferMethod = buffer == null ? null : buffer.Method,
                 BufferDetail = buffer == null ? null : buffer.Detail,
+                BufferReceivedUtc = buffer == null ? (DateTime?)null : lastBufferReceivedUtc,
                 FullText = buffer == null ? null : buffer.Text,
                 LogFilePath = log.Path,
                 AutoCopyFramePng = autoCopyFrame,
@@ -1034,7 +1048,7 @@ namespace RemoteMonitorSlave
                         ScrollBars = ScrollBars.Both, MaxLength = OutputBufferCapture.MaxCharacters,
                         Text = lastBuffer.Text ?? "미수집: " + lastBuffer.Code + "\r\n" + lastBuffer.Detail });
                     columns.Panel1.Controls.Add(new Label { Dock = DockStyle.Top, Height = 54,
-                        Text = "전체 텍스트 / " + lastBuffer.Method + "\r\n수집 완료 UTC " + lastBufferReceivedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
+                        Text = (lastBuffer.Method == "PREVIOUS_CAPTURE" ? "이전 참고 원문 (이번 자동 복사 실패)" : "전체 텍스트") + " / " + lastBuffer.Method + "\r\n수집 완료 UTC " + lastBufferReceivedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
                             " (버퍼 원자적 캡처 시각 아님)" });
                     var right = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
                     columns.Panel2.Controls.Add(right); right.SplitterDistance = 420;
@@ -1549,9 +1563,19 @@ namespace RemoteMonitorSlave
                         Detail = "SOURCE_PID_MATCH", Text = "첫 줄\r\nAFS Current Frequency (MHz) = 860.000\r\n마지막 줄" };
                     copiedBuffer.CharacterCount = copiedBuffer.Text.Length;
                     copiedBuffer.LineCount = OutputBufferCapture.CountLines(copiedBuffer.Text);
+                    var failedCopy = new OutputBufferResult { Code = "AUTO_COPY_BODY_UNCONFIRMED", Method = "NONE", Detail = "NONE" };
+                    var reference = PreviousReference(failedCopy, copiedBuffer);
+                    if (reference.Code != failedCopy.Code || reference.Method != "PREVIOUS_CAPTURE" || reference.Text != copiedBuffer.Text ||
+                        reference.CharacterCount != copiedBuffer.CharacterCount || reference.LineCount != copiedBuffer.LineCount ||
+                        failedCopy.Text != null || !ReferenceEquals(PreviousReference(failedCopy, null), failedCopy))
+                        throw new InvalidOperationException("Previous reference lost its text or concealed the automatic failure.");
                     var anchorVision = PowerSiObservation.VisionLogExcerpt("AFS Current Frequency (MHz) = 860.000", DateTime.UtcNow);
                     anchorVision.LocalEvidence = "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]\r\n캡처 UTC 2026-09-11 00:00:00\r\n" +
                         "AFS Current Frequency (MHz) = 860.000\r\n마지막  줄";
+                    var bracketed = new PowerSiObservation { LocalEvidence =
+                        "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]\r\n캡처 UTC 2026-09-11 00:00:00\r\n[Warning] 123\r\n[Done] 456" };
+                    if (TranscriptOf(bracketed) != "[Warning] 123\r\n[Done] 456")
+                        throw new InvalidOperationException("Bracket-prefixed Output text was removed as an evidence header.");
                     anchorVision.LocalFrame = bodyFrame;
                     anchorVision.LocalFullImage = bodyFrame.Png;
                     anchorVision.LocalFrameSize = bodyFrame.PixelSize;
@@ -1609,7 +1633,8 @@ namespace RemoteMonitorSlave
                         !form.anchorState.Text.Contains("자동 복사 위치: 학습됨"))
                         throw new InvalidOperationException("Status line did not show the last auto copy outcome.");
                     var bundle = form.BuildBundleContent(new[] { anchorVision });
-                    if (bundle.FullText != copiedBuffer.Text || bundle.LogFilePath != form.log.Path || bundle.Runs.Count != 1 ||
+                    if (bundle.FullText != copiedBuffer.Text || bundle.BufferReceivedUtc != form.lastBufferReceivedUtc ||
+                        bundle.LogFilePath != form.log.Path || bundle.Runs.Count != 1 ||
                         bundle.Runs[0].Comparison == null || bundle.Runs[0].Transcript == null ||
                         bundle.Runs[0].BodyDiagnostics != anchorVision.LocalBodyDiagnostics ||
                         !ReferenceEquals(bundle.AutoCopyFramePng, bodyFrame.Png) ||

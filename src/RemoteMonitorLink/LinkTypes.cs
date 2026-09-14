@@ -14,7 +14,7 @@ namespace RemoteMonitorLink
 {
     internal static class LinkVersion
     {
-        internal const string Value = "0.1.50";
+        internal const string Value = "0.1.51";
     }
 
     // Read-only metrics and bounded process names; never command lines, window titles or paths.

@@ -71,12 +71,14 @@ namespace RemoteMonitorSlave
                 "BUFFER_WORKER_FAILED", cancellation).ConfigureAwait(false);
         }
 
-        // Shared single-use worker host for every OB1 verb. Only this helper process is ever terminated.
+        // Read-only workers may be terminated immediately; an input worker first gets EOF and cleanup time.
         internal static async Task<OutputBufferResult> RunWorkerAsync(string arguments, int timeoutMilliseconds,
             string timeoutCode, string failureCode, CancellationToken cancellation)
         {
+            bool inputWorker = arguments.StartsWith(OutputAutoCopy.WorkerArgument + " ", StringComparison.Ordinal);
             using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, arguments)
-                { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true } })
+                { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
+                    RedirectStandardOutput = true, RedirectStandardInput = inputWorker } })
             {
                 try
                 {
@@ -96,8 +98,47 @@ namespace RemoteMonitorSlave
                 }
                 catch (OperationCanceledException) { throw; }
                 catch { return Failed(failureCode); }
+                finally
+                {
+                    try { await StopWorkerAsync(worker, inputWorker).ConfigureAwait(false); } catch { }
+                }
+            }
+        }
+
+        private static async Task<bool> StopWorkerAsync(Process worker, bool inputWorker)
+        {
+            if (inputWorker && !worker.HasExited)
+            {
+                try { worker.StandardInput.Close(); } catch (IOException) { } // Still enforce the exit bound if the pipe broke.
+                var cleanup = Stopwatch.StartNew();
+                while (!worker.HasExited && cleanup.ElapsedMilliseconds < 1000)
+                    await Task.Delay(25).ConfigureAwait(false);
+            }
+            if (worker.HasExited) return true;
+            // A hung provider still has a bounded lifetime. Input releases are paired in one SendInput call.
+            worker.Kill(); worker.WaitForExit(200);
+            return false;
+        }
+
+        private static void CancellationSelfTest()
+        {
+            using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
+                OutputAutoCopy.WorkerArgument + " --self-test-cancel") { UseShellExecute = false, CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardInput = true, RedirectStandardOutput = true } })
+            {
+                try
+                {
+                    worker.Start();
+                    var ready = worker.StandardOutput.ReadLineAsync();
+                    if (!ready.Wait(5000) || ready.Result != "READY") throw new InvalidOperationException("Input worker did not become ready.");
+                    var reading = worker.StandardOutput.ReadToEndAsync();
+                    if (!StopWorkerAsync(worker, true).GetAwaiter().GetResult() || !reading.Wait(1000) ||
+                        Parse(reading.Result).Code != "AUTO_COPY_TEST_CLEANUP")
+                        throw new InvalidOperationException("Input worker was killed before cooperative cleanup.");
+                }
                 finally { try { if (!worker.HasExited) { worker.Kill(); worker.WaitForExit(200); } } catch { } }
             }
+            Console.WriteLine("PASS: input worker cancellation completes cleanup before exit (no injected input)");
         }
 
         // Worker-side identity arguments. ResolveWindow has already validated and matched every PID/start time.
@@ -288,6 +329,7 @@ namespace RemoteMonitorSlave
             var oversize = false;
             try { Serialize(result); } catch (InvalidDataException) { oversize = true; }
             if (!oversize) throw new InvalidOperationException("Oversize buffer silently accepted.");
+            CancellationSelfTest();
             OutputAutoCopy.SelfTest();
         }
     }

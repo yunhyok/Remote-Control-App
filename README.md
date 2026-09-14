@@ -1,40 +1,29 @@
-# Remote Monitor v0.1.50 — 가림 없는 자동 복사와 클릭 후 확인
+# Remote Monitor v0.1.51 — 입력 전 본문 확인과 원문 대조 보정
 
-**다른 서비스에서 이어받기:** [HANDOFF.md](HANDOFF.md)에 목적·구조도·전체 진행 요약·확인된 결과·미완료 기능·다음 작업·빌드 방법을 정리했습니다. Claude 등의 시작 파일은 [CLAUDE.md](CLAUDE.md)입니다. 이전 단계 기록은 [PROJECT-REVIEW.md](PROJECT-REVIEW.md)이며 최신 상태와 구분해서 읽습니다.
+**다른 서비스에서 이어받기:** [HANDOFF.md](HANDOFF.md)에 목적·진행·현재 상태·남은 과제·빌드/배포 방법을 정리했습니다. [CLAUDE.md](CLAUDE.md)는 시작 안내, [PROJECT-REVIEW.md](PROJECT-REVIEW.md)는 시점별 이력입니다.
 
-휴대폰 KI-Messenger → Win7 Master → 사내망 Win11 Slave의 읽기 전용 상태 조회입니다. PowerSI와 LM Studio는 **같은 Slave 워크스테이션**에서 실행합니다.
+휴대폰 KI-Messenger → Win7 Master → 사내망 Win11 Slave의 읽기 전용 상태 조회입니다. PowerSI와 LM Studio는 **같은 Slave 워크스테이션**에서 실행합니다. 현재 현장 시험은 **Slave만** 사용합니다.
 
 ## 이번 확인
 
-현재 현장 시험은 **Slave만** 사용합니다. **두 방식 비교**를 한 번 실행하고, 수동 복사 안내가 나오면 Output 본문을 클릭한 뒤 Ctrl+A·Ctrl+C 합니다. 이 한 번의 수동 복사가 **자동 복사 위치 학습**입니다. 두 번째 **두 방식 비교**에서는 같은 PowerSI 인스턴스에 한해 앱이 **자기 창을 잠시 최소화하고** 그 위치를 클릭한 뒤 화면을 다시 확인해 Ctrl+A·Ctrl+C를 실행합니다. 모델을 바꿔 볼 때는 전체 비교를 반복하지 말고 **같은 화면 재판독**을 씁니다. 이어서 **원문 대조**와 **진단 묶음 저장**으로 전사본과 전체 텍스트의 차이를 확인합니다. [Slave 확인 방법](SLAVE-TEST.md).
+**v0.1.50 현장 시험은 사용자 요청으로 건너뛰고 v0.1.51로 전환합니다.** 첫 **두 방식 비교**의 수동 복사 한 번으로 위치를 학습합니다. 완료와 **학습됨**을 확인한 다음 Output 본문을 한 번 클릭해 선택 강조를 해제하고, 두 번째 비교에서 자동 복사 한 번만 확인합니다. 실패 시 반복 수동 복사는 요구하지 않습니다. 모델 비교는 OCR 입력이 만들어졌을 때 **같은 화면 재판독** 한 번으로 함께 확인할 수 있습니다. 자세한 순서와 제출물은 [SLAVE-TEST.md](SLAVE-TEST.md)에 있습니다.
 
-**v0.1.49 현장 시험에서 위치 학습은 6번 모두 성공했지만 자동 복사는 5번 모두 중단됐습니다**(가림 4회, 본문 미확정 1회). 키는 한 번도 전송되지 않았습니다. **v0.1.50의 변경도 개발자 자체 검사만 통과했고 실제 PowerSI에서 검증되지 않았습니다.** 자동 복사가 실패하면 기존 30초 수동 복사 안내로 그대로 돌아갑니다. 진행률을 계산하지 않으며, 로그의 의미와 진행 상황은 사용자가 판단합니다.
+**선택 강조가 남아 있으면 본문 검사가 실패할 수 있습니다.** 이때 클릭·키 입력 없이 중단하며, 확인을 통과시키기 위해 오래된 좌표로 먼저 클릭하지 않습니다. 자동 복사가 성공해도 Ctrl+A 강조가 다시 남으므로 **연속 무인 복사 완료가 아닙니다.** 선택 상태의 본문 재확인은 후속 과제입니다. Master·메신저·모바일, 장시간 대기, 창 크기 반복 변경, SELF-TEST 실행은 이번 사용자 시험에서 제외합니다.
 
-Slave 시작/IP/연결파일, Master·메신저·모바일 시험은 필요 없습니다. Output 크기를 반복해서 바꾸거나 **PowerSI 확인**을 추가로 실행하지 않습니다. 모델 교체는 사용자가 LM Studio에서 하고 Slave의 **LM Studio 설정**에 현재 모델을 저장합니다. 두 모델 동시 로드, 다운로드, GPU 설정 변경은 요구하지 않습니다.
+v0.1.49 현장 시험은 위치 학습6/6, 자동 복사0/5(가림4·본문 미확정1)였고 키는 전송되지 않았습니다. v0.1.50과 v0.1.51의 실제 PowerSI 자동 복사 성공은 아직 확인하지 않았습니다. v0.1.51 로컬 Windows 양쪽 Release 빌드·실제 EXE 자체 검사는 통과했고, 로컬 실제 입력 검사는 전경이 없어 SKIP했습니다. 최종 CI·배포 여부는 [HANDOFF §10](HANDOFF.md#10-검증-범위와-저장-정책)과 해당 workflow를 확인합니다. 진행률을 계산하지 않으며 로그의 의미는 사용자가 판단합니다.
 
-## v0.1.50에서 바꾼 것
+## v0.1.51에서 바꾼 것
 
-**1. 자동 복사 동안 Slave 창을 스스로 최소화합니다.** v0.1.49 현장 실패 4건은 클릭 지점의 맨 앞 창이 PowerSI가 아니라는 `AUTO_COPY_OCCLUDED`였고, 로그만으로는 무엇이 가렸는지 알 수 없었습니다. 이제 UI가 메인 창과 열린 대화상자를 최소화한 뒤 worker를 시작하고(`OUTPUT_AUTO_COPY_BEGIN self_hidden=1`) 결과와 무관하게 원래 상태로 되돌립니다. 그래도 가려져 있으면 가린 창의 프로그램 이름을 `OCCLUDER|<이름>`으로, 우리 창이면 `OCCLUDER|SELF`로 남깁니다.
+- **입력 전 확인:** 새 캡처에서 학습된 본문을 다시 찾고 경계 차이를 확인한 뒤에만 커서를 옮깁니다. 프레임 검사 후 대상/크기/좌표를 다시 검사하고, 클릭과 각 키 입력 직전 커서·가림·입력 상태를 확인합니다.
+- **Stop·시간 초과:** 마우스 down/up을 한 입력 배열로 보내고, 부모가 입력 worker에 취소를 알립니다. 최대1초 정리를 기다린 뒤 응답 없는 worker만 종료합니다.
+- **새 복사본 구분:** 자동 Ctrl+C 직전에 clipboard sequence 기준을 새로 잡습니다. 앞 단계의 수동 복사본을 자동 복사 성공으로 받지 않습니다. 자동 실패 뒤에는 수동 복사를 다시 요청하지 않고 실패 코드와 확보한 프레임을 남깁니다. 이전 원문은 `PREVIOUS_CAPTURE`로 수집UTC를 유지하고 **“이번 자동 복사 실패 — 이전 수집본 참고용”**으로 표시합니다. 새 수집 성공이 아닙니다.
+- **원문 대조:** 반복된 로그 줄은 원문에서 각 발생 행을 한 번만 대응합니다. `[Warning]`처럼 대괄호로 시작하는 실제 전사 행을 UI 안내문으로 오인해 삭제하지 않습니다. “누락”은 대응 원문이 없는 전사 행이며 **전체 로그 누락률이나 OCR 정확도는 아닙니다.**
 
-**2. 클릭한 다음에 화면을 확인합니다.** 순서가 "창 식별·client 크기·클릭 지점의 맨 앞 창 확인 → 클릭 1회 → 150ms → 새 캡처에서 본문 재확인 → 키 전송"으로 바뀌었습니다. 클릭이 직전 수동 Ctrl+A의 선택 강조를 지우므로 평평한 배경을 전제로 한 본문 검사가 반복 가능해집니다. 재확인한 본문은 클릭 지점을 포함해야 하고 학습 때 본문과 각 변8픽셀 이내여야 하며, 아니면 `AUTO_COPY_BODY_UNCONFIRMED`/`AUTO_COPY_BODY_MOVED`로 **키를 한 번도 보내지 않고** 중단합니다. 저장된 좌표를 그대로 믿고 누르는 것이 아니라, 살아 있는 창에서 확인한 지점을 한 번 누르고 그 결과 화면이 학습 때와 같을 때만 키를 보냅니다.
+## 유지되는 기능
 
-**3. 실패한 자동 복사의 화면을 남깁니다.** 캡처 이후에 중단된 경우 worker가 그 PNG를 UI로 돌려주고, UI는 마지막 1장을 메모리에 두었다가 진단 묶음에 `auto-copy-frame.png`로 넣습니다(manifest의 `auto_copy_last_failure`에 코드·detail). 파일로 자동 저장하지 않습니다.
+자동 복사 동안 Slave 창과 열린 대화상자를 최소화·복원하고, 가린 프로그램은 `OCCLUDER|이름`으로 남깁니다. 실패 시 확보한 worker PNG는 메모리에 두었다가 사용자가 요청한 진단 묶음의 `auto-copy-frame.png`에만 저장합니다. 본문 후보의 중심/90% 포함·크기·채움·모호성 검사, 본문 탐색 진단 `B2|…`, thinking 비활성화 요청과 `INCOMPLETE_REASONING` 구분도 유지합니다. 서버의 thinking 설정 준수는 미확인이고 사고 과정은 전사본으로 쓰지 않습니다.
 
-**4. 본문 후보 규칙에 포함 조건을 더했습니다.** 후보는 제안 상자의 중심을 포함하거나, **후보 면적의 90% 이상이 제안 안에 들어 있으면** 통과합니다. 현장에서 31B Q4의 `320|385|1570|574`는 좌·상·높이가 맞고 폭만 과했는데 중심 규칙에만 걸려 탈락했습니다. 크기·채움·과대·겹침 규칙과 "채택 후보는 정확히 하나"는 그대로이며, 한 제안 안에 본문이 둘이면 여전히 확정하지 않습니다.
-
-**5. 모델 사고 과정으로 답이 비는 경우를 구분합니다.** 두 요청에 `chat_template_kwargs.enable_thinking=false`를 넣고(모르는 서버는 무시합니다) OCR 요청의 최대 토큰을 4096으로 올렸습니다. 그래도 `finish_reason=length`이면서 `reasoning_content`만 있고 답이 비면 `INCOMPLETE_REASONING`으로 기록해 단순 길이 초과와 구분합니다. **사고 과정 텍스트는 어떤 경우에도 전사본으로 쓰지 않습니다.**
-
-메인 창 아래 상태줄에 **최근 자동 복사 코드**가 함께 표시됩니다.
-
-## v0.1.49에서 추가한 것 (그대로 유지)
-
-**1. 학습한 위치 자동 복사.** 표준 객체 직독이 실패하고 **학습한 Output 위치로 자동 복사** 설정이 켜져 있으며 같은 PID·프로세스 시작시각·세션의 인스턴스가 그대로 실행 중일 때만 시도합니다. 별도 worker 프로세스(최대8초)가 창을 다시 찾아 client 크기·표시 상태·최소화 여부를 확인하고, 마우스 버튼·Ctrl·Shift·Alt·Win이 눌려 있지 않은지와 클릭 지점의 최상위 창이 대상인지 확인한 뒤 커서를 옮겨 **클릭 한 번**을 보냅니다. v0.1.50은 그 다음 새로 캡처한 화면에서 본문을 다시 확인하고, 확인된 뒤에만 **Ctrl+A 한 번 → Ctrl+C 한 번**을 보냅니다. 모든 키는 finally에서 해제하고 커서는 원래 자리로 되돌립니다. 클립보드는 복원하지 않습니다. 중단 코드는 `AUTO_COPY_WINDOW_CHANGED`, `AUTO_COPY_BODY_UNCONFIRMED`, `AUTO_COPY_BODY_MOVED`, `AUTO_COPY_INPUT_BUSY`, `AUTO_COPY_OCCLUDED`, `AUTO_COPY_CURSOR_NOT_SET`, `AUTO_COPY_CURSOR_MOVED`, `AUTO_COPY_FOREGROUND_FAILED`, `AUTO_COPY_FOREGROUND_LOST`, `AUTO_COPY_KEYS_FAILED`, `AUTO_COPY_NO_CLIPBOARD`, `AUTO_COPY_CLIPBOARD_FOREIGN`, `AUTO_COPY_TIMEOUT` 등이며, 실패하면 클립보드 기준값을 다시 읽고 수동 복사 안내로 돌아갑니다. 위치는 **메모리에만** 두고 파일로 저장하지 않으며 앱을 닫으면 사라집니다.
-
-**2. 본문 탐색 진단 B2와 `OUTPUT_REGION_UNCONFIRMED`.** 본문 경계를 확정하지 못한 실행도 이제 `B2|화면폭|높이|후보수|채택수|크기탈락|채움탈락|과대탈락|중심·포함탈락|겹침탈락`를 남깁니다(v0.1.50에서 8번째 필드의 뜻만 넓어졌고 형식은 그대로입니다). 좌표·글자는 들어가지 않습니다. 경계 실패는 일반 판독 실패와 구분되는 `OUTPUT_REGION_UNCONFIRMED` 코드로 기록합니다.
-
-**3. 원문 대조.** 비교 창의 전사본 아래에 전사본 각 줄을 전체 텍스트 끝부분(기본600줄)과 맞춰 본 결과를 표시합니다. 일치·정규화 일치(앞뒤/중간 공백만 다름)·근사(편집 거리 이내, 첫 차이 위치 표시)·누락·빈 줄과 줄 순서 유지 여부를 구분합니다. 로그에는 `T1|줄수|일치|정규화|근사|누락|빈줄|순서`만 남기고 본문은 화면과 진단 묶음에만 둡니다.
-
-**4. 진단 묶음.** 비교 창의 **진단 묶음 저장…** 버튼으로만 만들어지는 ZIP입니다. 경고 확인 후 저장 위치를 직접 지정하며, 전체 텍스트·화면 이미지·전사본·대조 결과·실행 메타데이터·현재 진단 로그 사본이 들어갑니다. **사내 고유 정보가 그대로 들어 있으므로 Git이나 외부 공유 채널에 올리지 않습니다.** 로그에는 크기와 SHA256만 남기고 경로는 남기지 않습니다.
+**원문 대조**는 전사 행을 전체 텍스트 끝600줄과 비교하며 일치·정규화 일치·근사·누락·빈 줄·순서 여부를 표시합니다. 로그에는 `T1|줄수|일치|정규화|근사|누락|빈줄|순서`만 남깁니다. 원문·이미지·전사본은 로컬 비교 화면과 사용자가 직접 저장하는 **진단 묶음 ZIP**에만 들어갑니다. `buffer_received_utc`는 원문 수집시각, `transcript_format_validated`는 응답 형식 검사 결과이며 문자 정확도 인증이 아닙니다. 이 ZIP은 사내 정보를 포함하므로 Git이나 외부 공유 채널에 올리지 않습니다.
 
 v0.1.47의 현장 로그에서는 E4B가 전사 텍스트를 반환했지만, 31B 두 양자화는 위치 찾기에 약44~50초를 사용한 뒤 OCR 중 전체100초 제한에 도달했습니다. v0.1.48은 이미 확보한 OCR 입력을 재사용해 위치 찾기 시간을 다시 쓰지 않고, OCR에 설정된 최대90초를 사용할 수 있게 합니다.
 
@@ -55,7 +44,7 @@ Qwen 결과는 시간 초과가 아닌 `LOCATE_OUTPUT_INCOMPLETE_RESPONSE`이며
 | 표준 텍스트 객체 직접 읽기 | 화면 밖 줄/오른쪽에 잘린 문장도 버퍼에 있으면 정확히 읽음. 입력·클립보드·LLM 불필요 | 프로그램의 객체 노출/표준 컨트롤 지원 필요 |
 | 선택·복사 | Ctrl+A/C를 지원하는 비표준 본문의 전체 텍스트 확보 가능 | 정확한 대상 선택과 클립보드 출처 확인 필요. 수동 복사 1회로 위치를 배운 뒤에만 자동 복사를 시도하며 현장 미검증 |
 
-새 전체 텍스트 경로는 Output 이름을 native 컨테이너 또는 UIA의 non-root HWND에 연결하고, 그 안의 유일한 표준 multiline Edit/RichEdit를 `WM_GETTEXT`로 읽습니다. 자동 식별이 안 되면 먼저 학습된 위치로 자동 복사를 한 번 시도하고, 그 경로가 없거나 중단되면 같은 실행에서30초 동안 **Output 클릭 → Ctrl+A → Ctrl+C**로 새 수동 복사본을 받습니다. 두 경우 모두 작업 시작 이후 변경된 클립보드이면서 동일 PowerSI PID·시작시각·세션이 소유한 텍스트만 받습니다. 자동 복사도 Output 전체가 선택됐는지를 보증하지는 않으므로 원문 대조로 확인합니다.
+전체 텍스트 경로는 Output 이름을 native 컨테이너 또는 UIA non-root HWND에 연결하고, 그 안의 유일한 표준 multiline Edit/RichEdit를 `WM_GETTEXT`로 읽습니다. 식별이 안 되고 학습 위치가 없거나 자동 복사 설정이 꺼져 있으면 30초 동안 **Output 클릭 → Ctrl+A → Ctrl+C** 수동 복사 안내를 사용합니다. 학습된 위치가 있으면 자동 복사를 한 번 시도하며, 실패 뒤 수동 복사를 추가 요구하지 않습니다. 수동 경로는 작업 시작 이후, 자동 경로는 **자동 Ctrl+C 직전 기준 이후** 새 clipboard sequence와 동일 PowerSI PID·시작시각·세션 소유자를 검사합니다. 소유자 일치만으로 Output 전체 선택이 입증되지는 않으므로 수집된 내용과 글자·줄 수도 확인합니다.
 
 전체 버퍼는 최대8Mi UTF-16문자이며 초과하면 잘라서 성공 처리하지 않습니다. RichEdit의64K 초과 직독 제한은 수동 복사 대안으로 구분합니다. [Microsoft WM_GETTEXT 문서](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-gettext). PowerSI가 이미 버린 과거 로그는 복원하지 못합니다. 직독 중 길이 변화는 거부하지만 같은 길이의 갱신까지 원자적 스냅샷을 보증하지는 않습니다.
 
@@ -121,7 +110,7 @@ LM Studio **0.4.0 이상**의 `/api/v1/models`에서 현재 로드된 모델 인
 
 비교 실행은 LLM 판독과 전체 텍스트 읽기를 병행합니다. 직독 worker 최대10초, 수동 복사 대기30초, 복사 데이터 읽기 worker 최대3초, 전체 비교105초 제한입니다. 내부100초 제한의 크롭/오류 결과를 반환할 여유를 포함합니다. 클립보드 지연 렌더링도 별도 worker에서 처리하여 Stop이 멈추지 않도록 했습니다. `OUTPUT_BUFFER` 로그에는 고정 결과/방법, 글자·줄 수와 `B1|native객체수|Output범위수|표준본문후보수|UIA방문수`만 남깁니다. 자동 복사 성공은 `result=AUTO_COPY_READ method=AUTO_CLIPBOARD`와 `detail=A2|학습x|학습y|본문x|y|w|h|클릭화면x|클릭화면y|B2|…`입니다. `OUTPUT_VISION_CAPTURE/LOCATE_OUTPUT/CROP_OUTPUT/READ_CROP`는 실행 단계입니다. 텍스트 본문은 기록하지 않습니다.
 
-v0.1.49가 추가하고 v0.1.50이 이어 쓰는 줄은 `OUTPUT_AUTO_COPY_BEGIN self_hidden=1`, `OUTPUT_AUTO_COPY_FAILED code=… detail=…`(detail은 `B2|…` 또는 `OCCLUDER|…`), `OUTPUT_ANCHOR_LEARNED anchor=A2|…|본문x|y|w|h body=x|y|w|h diag=B2|…`, `OUTPUT_ANCHOR_UNCONFIRMED reason=FRAME_MISSING|SIZE_MISMATCH|BODY diag=…`, `TRANSCRIPT_COMPARE summary=T1|…`, `DIAG_BUNDLE_SAVED bytes=… sha256=…`, `DIAG_BUNDLE_FAILED code=…`입니다. 모두 고정 코드·정수·해시뿐이며 경로·본문·전사본은 들어가지 않습니다.
+v0.1.49부터 이어 쓰는 로그는 `OUTPUT_AUTO_COPY_BEGIN self_hidden=1`, `OUTPUT_AUTO_COPY_FAILED code=… detail=…`(detail은 `B2|…` 또는 `OCCLUDER|…`), `OUTPUT_ANCHOR_LEARNED anchor=A2|…|본문x|y|w|h body=x|y|w|h diag=B2|…`, `OUTPUT_ANCHOR_UNCONFIRMED reason=FRAME_MISSING|SIZE_MISMATCH|BODY diag=…`, `TRANSCRIPT_COMPARE summary=T1|…`, `DIAG_BUNDLE_SAVED bytes=… sha256=…`, `DIAG_BUNDLE_FAILED code=…`입니다. 고정 코드·정수·해시뿐이며 경로·본문·전사본은 들어가지 않습니다.
 
 캡처는 별도 단발 작업으로 최대 약4초입니다. 모델 판독은 설정 제한, 전체 Slave 판독은 최대100초입니다. 일반 상태/인증 제한은 기존8초이고, 인증된 PWRSI 요청만 서버105초·Master115초까지 허용합니다. 향후 연결 운용을 재개할 때는 버전 검사가 있으므로 양쪽을 같은 버전으로 맞춥니다. **이번에는 Slave만 교체하고 기존 Master와 연결하지 않습니다.**
 
@@ -139,4 +128,4 @@ Slave에는 판독 중 경과 시간과 완료 상태가 표시됩니다. **Slav
 
 Master는 별도 **개별 자기 대화창**을 인식하며, 검증된 입력·커서 이동·클릭 전송을 요청당 한 번만 수행합니다. Send 위에 미리 마우스를 놓을 필요는 없습니다. Master 창/전경 변경이나 입력 간섭은 중단 사유입니다. Slave 캡처는 창 활성화·마우스/키보드 입력을 하지 않습니다.
 
-배포물은 GitHub Releases의 pre-release `v0.1.50-rc1`에 있다(Slave-only ZIP SHA256 `2AC2821627418CB65CA07FEC305BF4D5A4846BB1ECD00CD2040B4566133A8D76`, 만드는 절차는 HANDOFF §9). `Remote-Monitor-Slave-v0.1.50-win11-net48.zip`은 Slave .NET Framework 4.8 EXE/config와 README/SLAVE-TEST를 포함하며, GitHub 인수인계 이후 빌드는 HANDOFF도 포함합니다. 전체 `Remote-Monitor-v0.1.50-win7-win11-net48.zip`에는 Master EXE/config와 보관용 WIN7-TEST가 추가됩니다. 현재 시험에서는 Slave만 실행합니다. 사용자에게 SELF-TEST.cmd 실행을 요구하지 않습니다. 내부 검사는 본문 경계 후보·포함 규칙·B2 진단 수치·앵커 직렬화/식별(A1·A2)·가린 창 이름 접기·worker 화면의 OB1 왕복·입력 패킷 구성과 소유한 시험 창에서의 클릭·Ctrl+A/C, 원문 대조 상태 분류, 진단 묶음 항목/해시, 픽셀 복제·하단 보존·요청 이미지 구분·실행/이미지 선택·같은 OCR PNG 재사용·현재 모델 선택·취소·로그 제외, 기존 전체 버퍼/LLM/통신 검사를 포함합니다. **실제 PowerSI에서의 자동 복사·원문 대조·진단 묶음과 숫자 전사 정확도는 아직 현장 확인 대상입니다.** 장시간 대기는 후순위입니다.
+새 사용자용 패키지는 CI `workflow_dispatch`의 `release_tag`로 GitHub Releases **pre-release**를 만듭니다([HANDOFF §9](HANDOFF.md#9-새-pc서비스에서-실행검증)). 소스 버전과 맞는 **새 rc 태그**만 허용하며 기존 태그/Release의 자산은 덮어쓰지 않습니다. `Remote-Monitor-Slave-v0.1.51-win11-net48.zip`은 Slave .NET Framework 4.8 EXE/config와 README/HANDOFF/SLAVE-TEST를 포함합니다. 전체 `Remote-Monitor-v0.1.51-win7-win11-net48.zip`에는 Master EXE/config와 보관용 WIN7-TEST가 추가됩니다. 게시 확인 전 다운로드 가능하다고 가정하지 않으며, 사용자에게는 게시된 Slave-only ZIP 직접 링크와 SHA256을 전달합니다. 사용자 SELF-TEST.cmd 실행은 요구하지 않습니다. 실제 PowerSI 자동 복사·전사 정확도는 현장 확인 대상이고 장시간 대기는 후순위입니다.

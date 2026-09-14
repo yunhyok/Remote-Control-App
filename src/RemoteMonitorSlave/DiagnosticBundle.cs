@@ -51,7 +51,7 @@ namespace RemoteMonitorSlave
         internal byte[] BodyPng;
         internal byte[] OcrInputPng;
         internal string Transcript;
-        internal bool TranscriptValidated;
+        internal bool TranscriptValidated; // Response format only, never OCR correctness.
         internal string Comparison;
         internal string Metadata;
     }
@@ -63,6 +63,7 @@ namespace RemoteMonitorSlave
         internal string BufferCode;
         internal string BufferMethod;
         internal string BufferDetail;
+        internal DateTime? BufferReceivedUtc;
         internal string FullText;
         internal string LogFilePath;
         // The auto-copy worker's own capture of a failed attempt, plus its "<CODE> <detail>" summary.
@@ -84,7 +85,8 @@ namespace RemoteMonitorSlave
             "Git 등 공개 저장소나 외부 공유 채널에 올리지 말고, 소유자가 필요하다고 판단한 담당자에게만 직접 전달하세요.\r\n" +
             "구성: manifest.json(메타데이터/해시), full-text.txt(Output 전체 텍스트),\r\n" +
             "slave-log.txt(진단 로그 사본, 있는 경우), auto-copy-frame.png(자동 복사 실패 시의 화면, 있는 경우),\r\n" +
-            "runs\\NN-이름\\ (화면 이미지, 대조 결과, 실행별 상세).\r\n";
+            "runs\\NN-이름\\ (화면 이미지, 대조 결과, 실행별 상세).\r\n" +
+            "transcript_format_validated는 응답 형식 검사 결과이며 문자 정확도 검증이 아닙니다.\r\n";
 
         internal static void Write(Stream target, DiagnosticBundleContent content)
         {
@@ -118,7 +120,7 @@ namespace RemoteMonitorSlave
                 var runJson = new Dictionary<string, object> {
                     { "index", i + 1 }, { "label", run.Label }, { "model_info", run.ModelInfo }, { "mode", run.Mode },
                     { "region_info", run.RegionInfo }, { "body_diagnostics", run.BodyDiagnostics }, { "result", run.Result },
-                    { "failure_code", run.FailureCode }, { "transcript_validated", run.TranscriptValidated },
+                    { "failure_code", run.FailureCode }, { "transcript_format_validated", run.TranscriptValidated },
                     { "transcript_included", run.Transcript != null }, { "comparison_included", run.Comparison != null },
                     { "metadata", run.Metadata }, { "images", images } };
                 runJsonTexts[i] = Serialize(runJson);
@@ -127,7 +129,7 @@ namespace RemoteMonitorSlave
                     { "index", i + 1 }, { "entry_dir", dir }, { "label", run.Label }, { "model_info", run.ModelInfo },
                     { "mode", run.Mode }, { "region_info", run.RegionInfo }, { "body_diagnostics", run.BodyDiagnostics },
                     { "result", run.Result }, { "failure_code", run.FailureCode },
-                    { "transcript_validated", run.TranscriptValidated }, { "transcript_included", run.Transcript != null },
+                    { "transcript_format_validated", run.TranscriptValidated }, { "transcript_included", run.Transcript != null },
                     { "comparison_included", run.Comparison != null }, { "metadata", run.Metadata }, { "images", images } });
             }
 
@@ -137,6 +139,7 @@ namespace RemoteMonitorSlave
             var manifest = new Dictionary<string, object> {
                 { "version", content.Version }, { "created_utc", content.CreatedUtc.ToString("o", CultureInfo.InvariantCulture) },
                 { "buffer_code", content.BufferCode }, { "buffer_method", content.BufferMethod }, { "buffer_detail", content.BufferDetail },
+                { "buffer_received_utc", content.BufferReceivedUtc?.ToString("o", CultureInfo.InvariantCulture) },
                 { "full_text_included", content.FullText != null }, { "log_included", logBytes != null },
                 { "auto_copy_last_failure", content.AutoCopyLastFailure }, { "auto_copy_images", autoCopyImages },
                 { "notes", content.Notes }, { "runs", manifestRuns } };
@@ -248,6 +251,8 @@ namespace RemoteMonitorSlave
 
                 var expectedFrameHash = ComputeHashHex(content.Runs[0].FullFramePng);
                 var manifestJson = ReadEntryText(archive, "manifest.json");
+                if (!manifestJson.Contains("transcript_format_validated") || manifestJson.Contains("\"transcript_validated\""))
+                    throw new InvalidOperationException("Format validation was mislabeled as transcript accuracy.");
                 if (!manifestJson.Contains(expectedFrameHash) || manifestJson.Contains(content.Runs[0].Transcript))
                     throw new InvalidOperationException("Diagnostic bundle manifest hash/metadata-only content is wrong.");
                 if (!manifestJson.Contains(autoCopyHash) || !manifestJson.Contains("auto_copy_last_failure") ||
