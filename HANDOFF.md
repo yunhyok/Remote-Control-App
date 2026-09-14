@@ -1,6 +1,8 @@
 # Remote Monitor — 다른 개발 에이전트를 위한 인수인계
 
-기준: **2026-09-14, v0.1.53 선택 강조 정리·경량 모델 재확인 준비**. v0.1.52 현장 결과를 반영했다. Windows 로컬 빌드·실제 EXE 자체 검사·비교 Form 확인은 통과했고 최종 CI·게시와 새 동작의 현장 확인은 대기 중이다. 저장소 `yunhyok/Remote-Control-App`은 사용자 승인으로 **Public**이다. 개발을 처음부터 재시작하지 않는다.
+기준: **2026-09-14, v0.1.53 선택 강조 정리·경량 모델 시험판 게시 완료**. v0.1.52 현장 결과를 반영했다. Windows 로컬 및 배포 CI 빌드·실제 EXE 검사와 게시 ZIP 검증을 마쳤다. 새 PowerSI 동작과 Qwen3-VL 8B OCR의 현장 확인은 다음 시험이다. 저장소 `yunhyok/Remote-Control-App`은 사용자 승인으로 **Public**이다. 개발을 처음부터 재시작하지 않는다.
+
+**현재 게시 확인:** [v0.1.53-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.53-rc1), 소스 `abe15eb5236d68443627430bdaeb5d71c39189f8`, [배포 CI 34802696478](https://github.com/yunhyok/Remote-Control-App/actions/runs/34802696478). build/release 성공, 익명 다운로드·두 ZIP 해시·실행 파일 버전/소스를 확인했다. 소스와 사후 검증 기록은 `codex/slave-v0.1.51-guarded-copy` / [PR #3](https://github.com/yunhyok/Remote-Control-App/pull/3)에 있으며 main 병합은 하지 않았다. 태그/자산은 그대로 두고 검증 기록만 후속 문서 커밋으로 남긴다.
 
 **이전 게시 확인:** [v0.1.52-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.52-rc1), 소스 `e7a1989943432aefbfcbaf9394a69fc18b77261f`. [배포 CI](https://github.com/yunhyok/Remote-Control-App/actions/runs/34797117891)의 build/release 성공, 익명 다운로드와 두 ZIP 해시를 확인했다(§9/§10). 이 결과를 v0.1.53 검증으로 사용하지 않는다. 게시 파일·태그는 덮어쓰지 않는다.
 
@@ -286,6 +288,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.53-rc1` | `abe15eb` | `Remote-Monitor-Slave-v0.1.53-win11-net48.zip` | `ADCFCEBD116EAAD299AEE0A0936B98CF0847F8ABF7198AF2005F15DDB9073C7D` |
+| | | `Remote-Monitor-v0.1.53-win7-win11-net48.zip` | `06315D8426A0CB4B827A73251394DBD370EE24ABA93D7E9D0DC1D236FBCFE8C6` |
 | `v0.1.52-rc1` | `e7a1989` | `Remote-Monitor-Slave-v0.1.52-win11-net48.zip` | `39527E0943C732BDCA57C1BDF9A75A6FED6CCB396009CFEF3203A888DC8E50A8` |
 | | | `Remote-Monitor-v0.1.52-win7-win11-net48.zip` | `200F25B55E3D34FAA8BC82D87DEAE865398C0A833FB5F789F985DE99059AF38F` |
 | `v0.1.51-rc1` | `943f6ad` | `Remote-Monitor-Slave-v0.1.51-win11-net48.zip` | `D5734D66FF01898F160E204D24F0B8F07090394B060ECFA669CD1FD41107A968` |
@@ -309,7 +313,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.53 로컬 검증 완료, 최종 CI/게시 대기.** Windows 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사와 실제 비교 Form의 레이아웃 검사를 통과했다. 성공 원문과 PNG를 함께 담는 worker 응답의 최대 크기, 자동 수집 후 판독 제한 재설정 수정까지 Slave를 다시 빌드·검사했다. 입력 보호·거부 응답 분리·좌표 형식·프레임 재사용·UI/진단 검사를 포함한다. 로컬 실제 입력 검사는 대화형 전경이 없어 SKIP이며 실패나 PowerSI 현장 성공을 뜻하지 않는다. 마지막 문구 변경을 포함한 최종 CI/패키지·Release 결과는 게시 후 갱신한다. 새 자동 선택 정리/깨끗한 프레임과 Qwen3-VL 8B OCR은 현장 미검증이다.
+**v0.1.53 검증/게시 완료:** Windows 로컬 및 [최종 소스 배포 CI](https://github.com/yunhyok/Remote-Control-App/actions/runs/34802696478)에서 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사 통과. 로컬에서는 실제 비교 Form의 레이아웃도 확인했다. 최대8Mi문자 원문+실제 PNG의 결합 응답, 깨끗한 PNG/원래 UTC 보존, 기존 입력 보호·취소, 좌표 형식/잘못된 영역, 거부 응답을 전사·대조 ZIP에서 제외하는 검사 등을 포함한다. 독립 검토의 결합 응답 상한·지연 시작 판독 제한 문제를 수정한 후 Slave를 다시 검사했다. 로컬 실제 입력은 전경이 없어 SKIP했지만 CI build job `103848392415`에서는 `PASS: live input test (click + Ctrl+A + Ctrl+C + deselect; repeated copy exact)`였다. 이는 소유한 검사용 TextBox의 실제 입력/선택 정리 검사이며 PowerSI 현장 확인을 대체하지 않는다.
+
+두 게시 ZIP을 인증 헤더 없이 내려받아 Release API digest와 SHA256SUMS.txt에 대조했다. Slave ZIP은182,037바이트이고 EXE/config/README/HANDOFF/SLAVE-TEST의5파일이다. EXE FileVersion은 `0.1.53.0`, ProductVersion은 `0.1.53+abe15eb5236d68443627430bdaeb5d71c39189f8`이며 원격 태그도 같은 소스다. ZIP 안 HANDOFF의 게시 대기는 빌드 전 기록이고 이 후속 문서가 최종 검증 기록이다. **새 자동 선택 정리/깨끗한 프레임과 Qwen3-VL 8B OCR은 현장 미검증**이다. 이전 버전의 성공을 이 새 동작의 성공으로 간주하지 않는다.
 
 **v0.1.52 검증:** Windows 로컬 및 [배포 CI 34797117891](https://github.com/yunhyok/Remote-Control-App/actions/runs/34797117891) 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE `--self-test` 통과. 합성18줄/2000자 초과/반복·빈 줄·Unicode 보존, 마지막 행까지의 재판독 결과, 미완료 응답 거부, 동일 PNG 및 thinking OFF 요청 검사와 기존 취소·입력 전 본문 검사·11항목 진단 묶음·UI 검사를 포함한다. 실제 입력 검사는 로컬에서 전경이 없어 SKIP했으나 CI의 소유 시험 창에서는 `PASS: live input test (click + Ctrl+A + Ctrl+C)`였다. 합성 자료를 넣은 실제 비교 Form의 기본 이미지 선택값/표시와 오프스크린 렌더링도 확인했다. 독립 검토에서 출시 차단 문제는 없었다. **게시 당시에는 실제 모델의 전사 완전성·다중 모델 비교가 현장 미검증이었다. 이후 v0.1.52 현장 결과는 §5에 기록했다.** `transcript_policy=ALL_VISIBLE_V1 thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=4096`은 요청 메타데이터이지 실제 모델의 정확도나 thinking 적용 인증이 아니다.
 
