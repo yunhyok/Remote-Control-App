@@ -10,7 +10,7 @@
 
 **선택 강조가 남아 있으면 본문 검사가 실패할 수 있습니다.** 이때 클릭·키 입력 없이 중단하며, 확인을 통과시키기 위해 오래된 좌표로 먼저 클릭하지 않습니다. 자동 복사가 성공해도 Ctrl+A 강조가 다시 남으므로 **연속 무인 복사 완료가 아닙니다.** 선택 상태의 본문 재확인은 후속 과제입니다. Master·메신저·모바일, 장시간 대기, 창 크기 반복 변경, SELF-TEST 실행은 이번 사용자 시험에서 제외합니다.
 
-v0.1.49 현장 시험은 위치 학습6/6, 자동 복사0/5(가림4·본문 미확정1)였고 키는 전송되지 않았습니다. v0.1.50과 v0.1.51의 실제 PowerSI 자동 복사 성공은 아직 확인하지 않았습니다. v0.1.51 로컬 Windows 양쪽 Release 빌드·실제 EXE 자체 검사는 통과했고, 로컬 실제 입력 검사는 전경이 없어 SKIP했습니다. 최종 CI·배포 여부는 [HANDOFF §10](HANDOFF.md#10-검증-범위와-저장-정책)과 해당 workflow를 확인합니다. 진행률을 계산하지 않으며 로그의 의미는 사용자가 판단합니다.
+v0.1.49 현장 시험은 위치 학습6/6, 자동 복사0/5(가림4·본문 미확정1)였고 키는 전송되지 않았습니다. v0.1.50과 v0.1.51의 실제 PowerSI 자동 복사 성공은 아직 확인하지 않았습니다. v0.1.51 로컬 빌드·자체 검사와 [최종 배포 CI](https://github.com/yunhyok/Remote-Control-App/actions/runs/34793626986)가 통과했고, CI 소유 시험 창의 실제 클릭·Ctrl+A/C 검사도 통과했습니다. [Slave 전용 ZIP](https://github.com/yunhyok/Remote-Control-App/releases/download/v0.1.51-rc1/Remote-Monitor-Slave-v0.1.51-win11-net48.zip)과 [SHA256SUMS.txt](https://github.com/yunhyok/Remote-Control-App/releases/download/v0.1.51-rc1/SHA256SUMS.txt)의 익명 다운로드·해시·EXE 버전을 확인했습니다([상세 검증](HANDOFF.md#10-검증-범위와-저장-정책)). 진행률을 계산하지 않으며 로그의 의미는 사용자가 판단합니다.
 
 ## v0.1.51에서 바꾼 것
 

@@ -2,6 +2,8 @@
 
 기준: **2026-09-14, v0.1.51 새 시험판**. 사용자는 v0.1.50 현장 시험을 건너뛰고 검토 개선점을 반영한 새 판으로 진행하도록 요청했다. Claude 등 다른 서비스가 원래 대화를 읽지 않아도 이어서 작업하기 위한 문서다. 저장소 `yunhyok/Remote-Control-App`은 사용자 승인으로 **Public**이다. 개발을 처음부터 재시작하지 않는다.
 
+**게시 확인:** [v0.1.51-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.51-rc1), 소스 `943f6adfc77ab9ca161b34781d3a10b9eb996187`. 새 소스와 이 검증 기록은 `codex/slave-v0.1.51-guarded-copy` / [PR #3](https://github.com/yunhyok/Remote-Control-App/pull/3)에 있으며 아직 main에 병합하지 않았다. 이 문서의 아래 v0.1.49/50 병합 기록과 구분한다.
+
 ## 1. 지금 이어받을 상태
 
 - **모바일 ↔ Win7 Master ↔ Win11 Slave의 읽기 전용 상태 왕복은 현장에서 확인했다.** 같은 마우스 오버·전송·기본 왕복 시험을 다시 요구하지 않는다.
@@ -284,12 +286,14 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.51-rc1` | `943f6ad` | `Remote-Monitor-Slave-v0.1.51-win11-net48.zip` | `D5734D66FF01898F160E204D24F0B8F07090394B060ECFA669CD1FD41107A968` |
+| | | `Remote-Monitor-v0.1.51-win7-win11-net48.zip` | `1E794ED3C93A8B3DF6970142FCBF1D4B8BA76C72BEDB604B06520F63EE65FEE0` |
 | `v0.1.50-rc1` | `d8249bf` (main에 병합됨) | `Remote-Monitor-Slave-v0.1.50-win11-net48.zip` | `2AC2821627418CB65CA07FEC305BF4D5A4846BB1ECD00CD2040B4566133A8D76` |
 | | | `Remote-Monitor-v0.1.50-win7-win11-net48.zip` | `F14F9E6F10339017CF10DA3B5CA22D61ACE14183F121BC312FE2F621144D7290` |
 | `v0.1.49-rc1` | v0.1.49 (`19bcd78`) | `Remote-Monitor-Slave-v0.1.49-win11-net48.zip` | `7ED9DD62E9B4A4C3F5F46E9E664FD372E540588CBFA4F6EAA56E60BB2AF5105A` |
 | | | `Remote-Monitor-v0.1.49-win7-win11-net48.zip` | `F1B04F8CA450A926C69FB3735EC20E24DA87DF545048268B8EE535A8694E62CC` |
 
-v0.1.50-rc1은 이전 공개 배포물이며 이번 현장 시험 대상에서 제외했다. 새 v0.1.51은 CI/Release 완료 뒤 직접 URL·SHA256을 확인해 전달한다. 게시 전 완료로 기록하지 않는다. 버전은 LinkTypes.cs·두 csproj·app.manifest에서 맞추며 build-package.ps1은 Slave csproj 버전을 패키지 이름에 사용한다.
+v0.1.50-rc1은 이번 현장 시험 대상에서 제외했다. v0.1.51-rc1은 익명 직접 다운로드와 두 ZIP의 SHA256을 Release API digest 및 SHA256SUMS.txt에 대조해 확인했다. Slave ZIP에는 EXE/config 및 README/HANDOFF/SLAVE-TEST의 5개 파일만 있다. 게시된 EXE FileVersion은 `0.1.51.0`, ProductVersion의 소스 접미사는 `943f6adfc77ab9ca161b34781d3a10b9eb996187`이다. 버전은 LinkTypes.cs·두 csproj·app.manifest에서 맞추며 build-package.ps1은 Slave csproj 버전을 패키지 이름에 사용한다.
 
 비교 화면 변경 시에는 기존 로컬 검증 도구를 이관한 다음 명령을 사용할 수 있다. 실제 PowerSI/LM Studio/사용자 화면 대신 합성 자료와 표시하지 않은 실제 Form을 사용한다. `DrawToBitmap`은 표시하지 않은 ComboBox의 선택 문구를 생략할 수 있어 native 선택값도 별도로 검사한다.
 
@@ -303,7 +307,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.51 로컬 개발 검증:** Windows 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사 통과. 입력 전 정상/이동/선택 강조/취소, stdin EOF 협력 정리, 이전 원문 참고용 보존, 실제 전사 행/응답 형식 표시, UI/진단 묶음 검사를 포함한다. 실제 입력 시험은 로컬 대화형 전경이 없어 **SKIP**했다. 이후 정리 경로의 작은 보완을 포함한 **최종 CI·게시 검증은 해당 Release의 workflow 실행 결과를 확인**해야 하며 여기서 게시 완료를 주장하지 않는다. 실제 PowerSI 자동 복사·선택 상태 지원·전사 정확도는 현장 미검증이다.
+**v0.1.51 검증:** 로컬 Windows 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사 통과. 입력 전 정상/이동/선택 강조/취소, stdin EOF 협력 정리, 이전 원문 참고용 보존, 실제 전사 행/응답 형식 표시, UI/진단 묶음 검사를 포함한다. 실제 입력 시험은 로컬 전경이 없어 SKIP했지만, 최종 소스 `943f6ad`의 [배포 CI 34793626986](https://github.com/yunhyok/Remote-Control-App/actions/runs/34793626986)은 build/release 모두 성공했다. build job stdout에서 `PASS: live input test (click + Ctrl+A + Ctrl+C)`까지 확인했다. 이는 러너의 소유 시험 창에서 정확한 클립보드 텍스트를 얻은 검사이며, EOF 취소 검사는 실제 입력 없는 별도 worker 정리 검사다. **실제 PowerSI의 자동 복사·입력 도중 Stop·선택 강조 상태 지원·전사 정확도는 현장 미검증**이다. 배포 태그/파일은 바꾸지 않고 이 사후 검증 기록만 문서 커밋으로 추가했다.
 
 v0.1.50 검증 범위: 이 버전도 **Linux 컨테이너에서 작성했고 Windows 로컬 빌드를 하지 않았다.** 근거는 해당 PR/commit의 GitHub Actions(windows-latest에서 양쪽 Release 빌드와 실제 EXE `--self-test`)뿐이다. 자체 검사에 추가한 것: 1920×1009 합성 프레임에서 폭이 과한 제안의 본문 채택과 겹치지 않는 제안의 거부, 한 제안 안의 두 본문이 여전히 모호로 남는지, 확인된 앵커(A2) 직렬화·본문 범위 검증·왜곡된 A2 거부, 가린 창 이름 접기, OB1 6번째 필드(프레임 PNG) 왕복과 비PNG 거부, 진단 묶음의 `auto-copy-frame.png`/`auto_copy_last_failure`, 상태줄의 최근 자동 복사 코드, `INCOMPLETE_REASONING` 분기와 reasoning 텍스트 미사용, 요청의 단계별 `max_tokens`와 thinking 비활성화. **실제 PowerSI에서의 자동 복사·경계 확정·전사 정확도는 여전히 검증하지 않았다.**
 
