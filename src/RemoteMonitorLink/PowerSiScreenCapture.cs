@@ -36,16 +36,18 @@ namespace RemoteMonitorLink
         private static readonly string[] Errors = { "SC_IDENTITY", "SC_NOT_RUNNING", "SC_WINDOW_UNAVAILABLE",
             "SC_AMBIGUOUS_WINDOW", "SC_MINIMIZED", "SC_DESKTOP_UNAVAILABLE", "SC_CAPTURE_FAILED", "SC_BLANK",
             "SC_SIZE", "SC_WINDOW_CHANGED", "SC_PENDING", "SC_FOREGROUND_FAILED", "SC_TIMEOUT", "SC_WORKER_FAILED",
-            "SC_INVALID_IMAGE" };
+            "SC_INVALID_IMAGE", "SC_GATE_REJECTED", "SC_FOREGROUND_REQUEST_REJECTED", "SC_FOREGROUND_WAIT_PENDING",
+            "SC_FOREGROUND_WAIT_MISMATCH", "SC_FOREGROUND_MISMATCH_PRECAPTURE", "SC_FOREGROUND_MISMATCH_POSTCAPTURE" };
 
         internal static async Task<PowerSiFrame> CaptureAsync(ProcessInventory inventory, CancellationToken cancellation)
         {
             return await RunWorker(WorkerArgument, WorkerArguments(inventory, false, cancellation), cancellation).ConfigureAwait(false);
         }
 
-        internal static async Task<PowerSiFrame> PrepareAsync(ProcessInventory singleton, CancellationToken cancellation)
+        internal static async Task<PowerSiFrame> PrepareAsync(ProcessInventory singleton, CancellationToken cancellation,
+            Action<string> diagnostic = null)
         {
-            return await RunWorker(PrepareWorkerArgument, WorkerArguments(singleton, true, cancellation), cancellation).ConfigureAwait(false);
+            return await RunWorker(PrepareWorkerArgument, WorkerArguments(singleton, true, cancellation), cancellation, diagnostic).ConfigureAwait(false);
         }
 
         private static string WorkerArguments(ProcessInventory inventory, bool requireSingleton, CancellationToken cancellation)
@@ -62,7 +64,8 @@ namespace RemoteMonitorLink
             return inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities;
         }
 
-        private static async Task<PowerSiFrame> RunWorker(string workerArgument, string arguments, CancellationToken cancellation)
+        private static async Task<PowerSiFrame> RunWorker(string workerArgument, string arguments, CancellationToken cancellation,
+            Action<string> diagnostic = null)
         {
             using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
                 workerArgument + " " + arguments) { UseShellExecute = false, CreateNoWindow = true,
@@ -78,7 +81,13 @@ namespace RemoteMonitorLink
                         cancellation.ThrowIfCancellationRequested();
                         // A foreground-capable parent may grant only this short-lived child. The child still verifies
                         // the actual foreground result; a refused grant never triggers a stronger activation method.
-                        AllowSetForegroundWindow((uint)worker.Id);
+                        var granted = AllowSetForegroundWindow((uint)worker.Id);
+                        try
+                        {
+                            if (diagnostic != null) diagnostic("grant=" + (granted ? "true" : "false") +
+                                " worker_pid=" + worker.Id.ToString(CultureInfo.InvariantCulture));
+                        }
+                        catch { } // Diagnostics are best-effort and never decide whether actual activation succeeds.
                         cancellation.ThrowIfCancellationRequested();
                         worker.StandardInput.WriteLine(PrepareGate);
                         worker.StandardInput.Close();
@@ -125,7 +134,7 @@ namespace RemoteMonitorLink
             try
             {
                 if (args[0] == PrepareWorkerArgument &&
-                    (!Console.IsInputRedirected || Console.In.ReadLine() != PrepareGate)) throw Failure("SC_FOREGROUND_FAILED");
+                    (!Console.IsInputRedirected || Console.In.ReadLine() != PrepareGate)) throw Failure("SC_GATE_REJECTED");
                 var frame = args[0] == PrepareWorkerArgument ? ReadPrepareWorker(args) : ReadWorker(args);
                 Console.Out.Write("SC1|" + frame.CapturedUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" + Convert.ToBase64String(frame.Png));
             }
@@ -151,10 +160,10 @@ namespace RemoteMonitorLink
             CheckUnchanged(args, window, windowRect, clientRect);
             SetExactForeground(window);
             CheckUnchanged(args, window, windowRect, clientRect);
-            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+            RequireForeground(window, "SC_FOREGROUND_MISMATCH_PRECAPTURE");
             var frame = CaptureWindow(window);
             CheckUnchanged(args, window, windowRect, clientRect);
-            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+            RequireForeground(window, "SC_FOREGROUND_MISMATCH_POSTCAPTURE");
             return frame;
         }
 
@@ -179,18 +188,30 @@ namespace RemoteMonitorLink
 
         private static void SetExactForeground(IntPtr window)
         {
-            if (!SetForegroundWindow(window)) throw Failure("SC_FOREGROUND_FAILED");
-            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+            if (!SetForegroundWindow(window)) throw Failure("SC_FOREGROUND_REQUEST_REJECTED");
+            // Cross-input-queue activation completes asynchronously. WM_NULL is a bounded barrier behind that request.
+            RequireResponsive(window, "SC_FOREGROUND_WAIT_PENDING");
+            RequireForeground(window, "SC_FOREGROUND_WAIT_MISMATCH");
+        }
+
+        private static void RequireForeground(IntPtr window, string failureCode)
+        {
+            if (GetForegroundWindow() != window) throw Failure(failureCode);
         }
 
         // Passive Windows message-pump probe only; it cannot identify every application-internal pending phase.
         internal static void RequireResponsive(IntPtr root)
         {
+            RequireResponsive(root, "SC_PENDING");
+        }
+
+        private static void RequireResponsive(IntPtr root, string failureCode)
+        {
             UIntPtr ignored;
             if (root == IntPtr.Zero || IsHungAppWindow(root) ||
                 SendMessageTimeout(root, WmNull, UIntPtr.Zero, IntPtr.Zero,
                     SmtoBlock | SmtoAbortIfHung | SmtoErrorOnExit, ResponsivenessMilliseconds, out ignored) == IntPtr.Zero)
-                throw Failure("SC_PENDING");
+                throw Failure(failureCode);
         }
 
         // Shared target identity, independent of screenshot or text collection. Single window is the current field-test scope.
@@ -401,12 +422,26 @@ namespace RemoteMonitorLink
             Reject(() => Parse("SC_TIMEOUT"), "SC_TIMEOUT");
             Reject(() => Parse("SC_PENDING"), "SC_PENDING");
             Reject(() => Parse("SC_FOREGROUND_FAILED"), "SC_FOREGROUND_FAILED");
+            foreach (var code in new[] { "SC_GATE_REJECTED", "SC_FOREGROUND_REQUEST_REJECTED",
+                "SC_FOREGROUND_WAIT_PENDING", "SC_FOREGROUND_WAIT_MISMATCH",
+                "SC_FOREGROUND_MISMATCH_PRECAPTURE", "SC_FOREGROUND_MISMATCH_POSTCAPTURE" })
+                Reject(() => Parse(code), code);
             Reject(() => Parse(new string('X', MaxWireChars + 1)), "SC_INVALID_IMAGE");
 
             var singleton = new ProcessInventory { SessionId = 7, Items = new[] {
                 new ProcessState { Pid = 41, Name = "powersi", StartUtcTicks = 123 } } };
             if (WorkerArguments(singleton, true, CancellationToken.None) != "7 41:123")
                 throw new InvalidOperationException("Explicit PowerSI singleton identity changed.");
+            using (var cancelled = new CancellationTokenSource())
+            {
+                cancelled.Cancel();
+                try
+                {
+                    PrepareAsync(singleton, cancelled.Token).GetAwaiter().GetResult();
+                    throw new InvalidOperationException("Cancelled prepare worker started.");
+                }
+                catch (OperationCanceledException) { }
+            }
             Reject(() => WorkerArguments(new ProcessInventory { SessionId = 7, Items = new[] {
                 new ProcessState { Pid = 41, Name = "powersi", StartUtcTicks = 123 },
                 new ProcessState { Pid = 42, Name = "pwrsi", StartUtcTicks = 456 } } }, true,
@@ -462,14 +497,7 @@ namespace RemoteMonitorLink
             const uint toolWindow = 0x00000080;
             var first = CreateWindowEx(toolWindow, "Static", "Owned capture self-test 1", popupVisible,
                 -32000, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            var second = CreateWindowEx(toolWindow, "Static", "Owned capture self-test 2", popupVisible,
-                -31600, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-            if (first == IntPtr.Zero || second == IntPtr.Zero)
-            {
-                if (first != IntPtr.Zero) DestroyWindow(first);
-                if (second != IntPtr.Zero) DestroyWindow(second);
-                throw new InvalidOperationException("Owned capture windows were not created.");
-            }
+            if (first == IntPtr.Zero) throw new InvalidOperationException("Owned capture window was not created.");
             try
             {
                 var before = GetForegroundWindow();
@@ -477,23 +505,77 @@ namespace RemoteMonitorLink
                 if (GetForegroundWindow() != before)
                     throw new InvalidOperationException("Responsiveness probe changed the foreground window.");
 
-                // Exercise the real foreground call when this self-test process has foreground rights.
+                // Exercise the real cross-input-queue delay when this self-test process has foreground rights.
                 if (SetForegroundWindow(first) && GetForegroundWindow() == first)
                 {
-                    Rect windowRect, clientRect, currentWindow, currentClient;
-                    ReadGeometry(second, out windowRect, out clientRect);
-                    SetExactForeground(second);
-                    if (GetForegroundWindow() != second || !GetWindowRect(second, out currentWindow) ||
-                        !GetClientRect(second, out currentClient) || !SameRect(windowRect, currentWindow) ||
-                        !SameRect(clientRect, currentClient))
-                        throw new InvalidOperationException("Owned foreground switch changed target geometry.");
+                    IntPtr delayed = IntPtr.Zero;
+                    Exception delayedError = null;
+                    using (var ready = new ManualResetEvent(false))
+                    using (var pump = new ManualResetEvent(false))
+                    using (var release = new ManualResetEvent(false))
+                    {
+                        var thread = new Thread(() =>
+                        {
+                            try
+                            {
+                                delayed = CreateWindowEx(toolWindow, "Static", "Owned delayed foreground self-test", popupVisible,
+                                    -31600, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                                ready.Set();
+                                if (delayed != IntPtr.Zero && pump.WaitOne(5000))
+                                {
+                                    System.Windows.Forms.Application.DoEvents();
+                                    release.WaitOne(5000);
+                                }
+                            }
+                            catch (Exception error) { delayedError = error; }
+                            finally
+                            {
+                                ready.Set();
+                                if (delayed != IntPtr.Zero) DestroyWindow(delayed);
+                            }
+                        });
+                        thread.IsBackground = true;
+                        thread.SetApartmentState(ApartmentState.STA);
+                        thread.Start();
+                        if (!ready.WaitOne(2000) || delayed == IntPtr.Zero || delayedError != null)
+                        {
+                            pump.Set(); release.Set(); thread.Join(2000);
+                            throw new InvalidOperationException("Owned delayed window was not created.", delayedError);
+                        }
+                        try
+                        {
+                            uint pid;
+                            uint ownerThread = GetWindowThreadProcessId(delayed, out pid);
+                            using (var self = Process.GetCurrentProcess())
+                                if (ownerThread == GetCurrentThreadId() || pid != (uint)self.Id)
+                                throw new InvalidOperationException("Delayed foreground test did not cross a message queue.");
+                            Rect windowRect, clientRect, currentWindow, currentClient;
+                            ReadGeometry(delayed, out windowRect, out clientRect);
+                            var delay = new Thread(() => { Thread.Sleep(150); pump.Set(); });
+                            delay.IsBackground = true;
+                            delay.Start();
+                            var clock = Stopwatch.StartNew();
+                            SetExactForeground(delayed);
+                            if (!delay.Join(2000) || clock.ElapsedMilliseconds < 75 || clock.ElapsedMilliseconds > 2000 ||
+                                GetForegroundWindow() != delayed || !GetWindowRect(delayed, out currentWindow) ||
+                                !GetClientRect(delayed, out currentClient) || !SameRect(windowRect, currentWindow) ||
+                                !SameRect(clientRect, currentClient))
+                                throw new InvalidOperationException("Cross-queue foreground barrier or target geometry changed.");
+                            Console.WriteLine("PASS: cross-queue foreground completion barrier (single request, unchanged geometry)");
+                        }
+                        finally
+                        {
+                            pump.Set(); release.Set();
+                            if (!thread.Join(2000)) throw new InvalidOperationException("Owned delayed window did not close.");
+                        }
+                    }
                 }
+                else Console.WriteLine("SKIP: cross-queue foreground barrier (no interactive foreground)");
             }
-            finally
-            {
-                DestroyWindow(second);
-                DestroyWindow(first);
-            }
+            finally { DestroyWindow(first); }
+
+            try { SetExactForeground(IntPtr.Zero); throw new InvalidOperationException("Invalid foreground target was accepted."); }
+            catch (InvalidDataException error) when (error.Message == "SC_FOREGROUND_REQUEST_REJECTED") { }
 
             IntPtr blocked = IntPtr.Zero;
             Exception blockedError = null;
@@ -525,13 +607,17 @@ namespace RemoteMonitorLink
                 try
                 {
                     var foreground = GetForegroundWindow();
+                    Rect windowRect, clientRect, currentWindow, currentClient;
+                    ReadGeometry(blocked, out windowRect, out clientRect);
                     var clock = Stopwatch.StartNew();
-                    try { RequireResponsive(blocked); throw new InvalidOperationException("Pending window was accepted."); }
-                    catch (InvalidDataException error) when (error.Message == "SC_PENDING") { }
+                    try { RequireResponsive(blocked, "SC_FOREGROUND_WAIT_PENDING"); throw new InvalidOperationException("Pending window was accepted."); }
+                    catch (InvalidDataException error) when (error.Message == "SC_FOREGROUND_WAIT_PENDING") { }
                     if (clock.ElapsedMilliseconds > 2000)
                         throw new InvalidOperationException("Pending window check exceeded its bound.");
-                    if (GetForegroundWindow() != foreground)
-                        throw new InvalidOperationException("Pending window check changed the foreground window.");
+                    if (GetForegroundWindow() != foreground || !GetWindowRect(blocked, out currentWindow) ||
+                        !GetClientRect(blocked, out currentClient) || !SameRect(windowRect, currentWindow) ||
+                        !SameRect(clientRect, currentClient))
+                        throw new InvalidOperationException("Pending window check changed foreground or target geometry.");
                 }
                 finally
                 {

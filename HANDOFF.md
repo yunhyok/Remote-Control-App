@@ -1,10 +1,13 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.54 복수 PowerSI 자동 시작 구현 / 개발 검증·v0.1.54-rc1 게시 완료 / 두 PowerSI 현장 시험 대기**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.55 활성화 완료 동기화·빈 화면 구분 구현 / 로컬 검증 완료·CI/게시 대기**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
 - 모바일 ↔ Win7 Master ↔ Win11 Slave의 정형 상태 왕복은 현장 확인했다. **현재는 Slave-only**, Master/mobile 시험을 반복하지 않는다.
+- **새 운영 지시:** 현장 결과를 받으면 분석에만 멈추지 말고, 미완료인 승인 범위의 수정·검증·다음 시험판 배포까지 이어간다. 매번 "진행"을 다시 요구하지 않는다. 명시적인 진단만 요청/새 권한 경계는 존중하고 다른 기능을 임의 추가하지 않는다.
+- **v0.1.54 현장 ZIP remote-monitor-diag-20260914-055922-pid94416:** 두 PID(78300/134548), 두 배치 모두 SC_FOREGROUND_FAILED, 대상별621~664ms. 모델 호출/유효한 이미지 반환이 없었다. 사용자는 두 창이 활성화되는 것을 보았고 한쪽 Output은 비어 있었다. 하나의 코드가 전경 요청/즉시 검사/캡처 전후 불일치를 합쳤으므로 정확한 실패 위치는 당시 로그만으로 확정할 수 없다. 이미지를 만든 뒤 버렸을 가능성도 있다. 원문 ZIP은 Git에 저장하지 않는다.
+- v0.1.55는 전경 전환 요청 후 제한된 WM_NULL 응답으로 완료를 동기화하고 정확한 창을 확인한다. 본문이 픽셀 기준으로 확실히 비어 있으면 OUTPUT_VISIBLE_EMPTY로 별도 표시하고 입력/OCR을 생략한다. **화면에서 보이지 않는 과거 로그까지 비었다고 단정하지 않는다.**
 - **v0.1.53 현장 ZIP remote-monitor-diag-20260914-043204-pid108452**: Qwen3-VL-8B-Instruct Q4_K_M, OCR5.318초·전체8.665초. OCR18줄은 전체 복사 원문의1619–1636행과 연속 대응하며 숫자·문자가 같고 바깥 공백2줄만 달랐다. 그 ZIP은 최초 수동 복사1회뿐이며 자동 복사 실행 증거는 없다. 원문/이미지를 Git에 넣지 않는다.
 - 사용자는 **PowerSI 최대화·복원·크기 변경 금지**를 명시했다. 두 PowerSI를 직접 원하는 크기로 준비한다. 앱은 해당 창을 전경으로 가져오는 것만 허용한다.
 - **모든 PowerSI 인스턴스**가 수집 대상이다. 한 개만 임의 선택하지 않는다. 이번은 두 개를 한 번에 수집하는 시험이다.
@@ -74,7 +77,8 @@ Master는 **사람 목록이 붙은 통합 채팅창이 아닌 별도 개별 자
 | v0.1.51 | 입력 전 본문 확인·협력 취소·새 clipboard 기준·반복 행 대조·실제 전사 행 보존 | v0.1.50 시험 생략. 현장에서 단발 자동 복사 성공, OCR은18줄 중 앞12줄만 반환. 연속 무인 복사는 미완료 |
 | v0.1.52 | OCR 입력의 모든 줄 요청·전사 절단 제거·실제 입력 기본 표시·요청 정책 메타데이터 | 현장 성공4결과 모두18줄 전사, 숫자·문자 일치. 자동 복사6/8, 가림2회. 모든 실행 thinking OFF 사용자 확인 |
 | v0.1.53 | 좌표 접두부 생략 허용·거부 응답 분리·재판독 표시·자동 선택 정리와 깨끗한 OCR 프레임 | 검증·게시 완료. Qwen3-VL 8B 수동 비교18줄 일치 확인, 새 자동 선택 정리는 해당 현장 ZIP에서 미실행 |
-| v0.1.54 | 최초 수동 선택 없는 복수 PID 수집·전경 전환만 허용·Windows 무응답 검사·PID별 결과와 ZIP | 검증·게시 완료. 사용자가 준비한 두 PowerSI를 한 번에 자동 수집하는 현장 시험 대기 |
+| v0.1.54 | 최초 수동 선택 없는 복수 PID 수집·전경 전환만 허용·Windows 무응답 검사·PID별 결과와 ZIP | 검증·게시 후 현장에서 두 PID × 두 실행 모두 SC_FOREGROUND_FAILED. 새 자동 흐름 성공은 미확인 |
+| v0.1.55 | 전경 활성화 완료 동기화·단계별 실패 코드·빈 화면 관측과 원문 미확인 구분 | 로컬 검증 완료·CI/게시 대기. 내용 있는 창+빈 Output 한 번 수집이 현장 시험 |
 
 v0.1.33의 Slave `STATUS_SENT` 6회는 직접 상태 조회 1회와 모바일 5회를 합친 것이다. 모바일 답장 6회로 쓰지 않는다. 다섯 번째 성공 뒤 `STATUS_TARGET_CHANGED`는 다음 요청 대기 중의 안전 중단이며 앞선 5회 실패를 뜻하지 않는다. 상세 근거/당시 제한은 PROJECT-REVIEW의 해당 절에 있다.
 
@@ -155,13 +159,15 @@ v0.1.33의 Slave `STATUS_SENT` 6회는 직접 상태 조회 1회와 모바일 5�
 
 당시에는 Qwen3.6-35B-A3B Q8_0를 우선 후보로, Qwen3-VL-8B/30B-A3B-Instruct를 대안으로 검토했고 E4B·Gemma31B는 위치 오류/시간 초과 때문에 보류했다. OCR 전용 모델은 위치/OCR 모델 분리 기능이 필요할 수 있어 후속 후보였다. **현재 판단은 위 v0.1.52 결과가 우선**이며 과거 시간 초과만으로 모델을 영구 배제하지 않는다. 모델 이름·양자화는 코드에 고정하지 않는다. 당시 참고 출처는 [LM Studio Qwen3.6-35B-A3B](https://lmstudio.ai/models/qwen/qwen3.6-35b-a3b), [thinking 끄기 논의](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/discussions/12), [2026 로컬 VLM 비교](https://tinyweights.dev/posts/best-local-vision-language-models-2026/)다.
 
-## 6. 현재 수집 구현 (v0.1.54)
+## 6. 현재 수집 구현 (v0.1.55)
 
 SlaveForm.ReadOutputBuffer가 세션의 PowerSI 목록을 한 번 얻어 PID순으로 순차 처리한다. ProcessInventory의 기존128항목 상한 밖이면 누락 수를 표시한다. 각 대상은 원래 PID·시작 시각·세션이 고정된 singleton inventory로 처리하며 새로 생긴 PID는 다음 실행 대상이다. 다른 PowerSI가 존재해도 선택한 PID와 섞지 않는다. 같은 PID에 여러 visible window가 있으면 SC_AMBIGUOUS_WINDOW다.
 
 흐름: 자기 Slave 창 최소화 → PrepareAsync(Windows 응답 확인, SetForegroundWindow만, 캡처) → 표준 전체 텍스트 직독 → 직독이 불가하면 Local LLM LOCATE_ONLY → 픽셀 본문 확정 → AnchorFromVision → 입력 worker의 새 본문/대상/응답 재검증 → 선택 해제 클릭/깨끗한 캡처/Ctrl+A/C/선택 정리 → ReframeOutput → 동일 로드 모델로 OCR1회 → 다음 PID.
 
-Prepare worker에 부모가 그 자식 PID만 foreground 권한을 허용하고 GO를 준다. 거부되면 SC_FOREGROUND_FAILED이며 키·클릭·AttachThreadInput으로 우회하지 않는다. PowerSI ShowWindow/최대화/복원/resize는 없다. 최소화·잠금·세션 연결 해제는 실패다.
+Prepare worker에 부모가 그 자식 PID만 foreground 권한을 허용하고 GO를 준다. OUTPUT_PREPARE 로그에는 PID와 권한 허용 결과를 남긴다. 전경 요청은 한 번뿐이며 요청 후 최대750ms WM_NULL 응답을 기다리고 정확한 전경 창을 확인한다. 요청 거부/동기화 대기/전경 불일치와 캡처 전후 검사를 SC_* 코드로 구분한다. 키·클릭·AttachThreadInput으로 우회하지 않는다. PowerSI ShowWindow/최대화/복원/resize는 없다. 최소화·잠금·세션 연결 해제는 실패다. [Microsoft의 비동기 전경 전환 설명](https://devblogs.microsoft.com/oldnewthing/20161118-00/?p=94745)이 수정 근거이며 고정 sleep으로 성공을 가정하지 않는다.
+
+위치 모델과 기존 본문 경계 검사를 통과한 뒤 **본문 모든 픽셀이 동일한 무채색일 때만** LocalVisibleEmpty를 설정한다. 가장자리의 한 픽셀·커서·무늬라도 다르면 이 판정을 하지 않는다. OUTPUT_VISIBLE_EMPTY는 로컬 결과이며 Text=null/전체 버퍼 미확인, 이미지 보존, 클릭·복사·OCR/같은 이미지 재판독 생략이다. PS2 wire 계약은 그대로다. 새 clipboard가 없다는 사실만으로 빈 버퍼라고 판정하지 않는다. 빈 것으로 확정되지 않는 커스텀 화면은 기존 수집 실패/미확인 결과를 유지한다.
 
 RequireResponsive는 IsHungAppWindow 및 최대750ms WM_NULL 메시지 응답으로 Windows 응답 없음만 확인한다. 실패 시 SC_PENDING이며 활성화·클릭·키를 중단한다. **내부 시뮬레이션 pending의 모든 구간을 감지하지는 못한다.** 자동 입력 직전 재검사도 이 한계와 상태 변경 사이의 경합을 없애지는 못한다.
 
@@ -185,7 +191,7 @@ OUTPUT_BATCH_BEGIN/COMPLETE, OUTPUT_TARGET_BEGIN/END(pid/start/code/elapsed_ms),
 
 ## 7. 다음 현장 시험과 후속 과제
 
-[SLAVE-TEST.md](SLAVE-TEST.md)의 두 창 한 번 수집이 기준이다. PowerSI 두 개의 Output을 보이게 두고, Qwen3-VL8B thinking OFF로 **새 화면 두 방식 비교** 한 번 실행한다. 최초 수동 복사 없음. 완료 후 두 PID의 원문/실제 OCR 입력/마지막 줄/숫자를 보고 진단 ZIP 하나를 전달한다.
+[SLAVE-TEST.md](SLAVE-TEST.md)의 두 창 한 번 수집이 기준이다. 현재 내용 있는 PowerSI와 빈 Output을 그대로 두고 Qwen3-VL8B thinking OFF로 **새 화면 두 방식 비교** 한 번 실행한다. 최초 수동 복사 없음. 내용 있는 쪽의 원문/실제 OCR 입력/최신 줄/숫자와 빈 쪽의 표시/캡처를 보고 진단 ZIP 하나를 전달한다. 빈 창에 로그를 만들거나 반복 시험으로 보충할 필요는 없다.
 
 내부 pending 판별과 무입력 관측, HFSS/다른 앱, 모바일 발췌문 전달/복수 PID 계약, 장기 대기/복구는 후속이다. 현재 시험에서 pending 위험 구간이나 crash를 일부러 재현하라고 요청하지 않는다. 범용 플러그인 틀이나 임의 제어 명령은 만들지 않는다.
 
@@ -226,13 +232,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build-package.ps
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build-package.ps1 -SlaveOnly
 ```
 
-스크립트는 각 대상 restore/build Release → 실제 EXE `--self-test` → 종료 코드 확인 → ZIP/SHA256 생성을 한다. 자체 검사에는 모의 loopback 서버, 프로토콜/인증/모델 응답/픽셀/재판독/취소/UI 상태 검사 등이 있다. 실사용 앱 창에 입력하는 시험과 구분한다. `dist/verification-v0.1.54/`의 stdout/stderr로 결과를 확인한다. 필요한 변경이 있을 때만 기존 추가 개발용 `scripts/test-powersi-capture.ps1`, `test-powersi-discovery.ps1` 등을 실행한다. `test-layout-replay.ps1`은 별도 현장 로그가 필요한 과거 KI 재현용이며 일반 빌드 필수조건이 아니다.
+스크립트는 각 대상 restore/build Release → 실제 EXE `--self-test` → 종료 코드 확인 → ZIP/SHA256 생성을 한다. 자체 검사에는 모의 loopback 서버, 프로토콜/인증/모델 응답/픽셀/재판독/취소/UI 상태 검사 등이 있다. 실사용 앱 창에 입력하는 시험과 구분한다. `dist/verification-v0.1.55/`의 stdout/stderr로 결과를 확인한다. 필요한 변경이 있을 때만 기존 추가 개발용 `scripts/test-powersi-capture.ps1`, `test-powersi-discovery.ps1` 등을 실행한다. `test-layout-replay.ps1`은 별도 현장 로그가 필요한 과거 KI 재현용이며 일반 빌드 필수조건이 아니다.
 
 ### GitHub Actions로 배포물 만들기 (v0.1.49-rc1부터)
 
 push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--self-test`를 수행하고 자체 검사 stdout/stderr를 로그와 아티팩트에 남긴다. 아티팩트는 GitHub 로그인이 있어야 내려받을 수 있으므로 사용자 전달용이 아니다. 사용자 전달용 배포물은 다음 절차로 만든다.
 
-1. GitHub → Actions → CI → **Run workflow**. 브랜치를 고르고 `release_tag`에 태그(예: `v0.1.54-rc1`)를 입력한다.
+1. GitHub → Actions → CI → **Run workflow**. 브랜치를 고르고 `release_tag`에 태그(예: `v0.1.55-rc1`)를 입력한다.
 2. `release` job이 해당 커밋에서 전체 및 Slave-only 패키지를 빌드·자체 검사한다. 태그는 **소스 버전과 같은 `v<버전>-rc<양의 정수>`의 새 이름**이어야 한다. 기존 원격 태그/Release나 조회 오류는 실패 처리한다. 정확한 workflow SHA에 태그를 원자적으로 생성한 뒤 **현재 버전 두 ZIP과 SHA256SUMS.txt만** pre-release에 올린다. 덮어쓰기는 없다. 태그 생성 후 게시가 실패해도 같은 태그를 재사용하지 말고 새 rc 번호를 쓴다.
 3. 사용자에게는 Slave-only ZIP의 직접 링크와 SHA256을 전달한다. 링크 형식: `https://github.com/yunhyok/Remote-Control-App/releases/download/<태그>/Remote-Monitor-Slave-<버전>-win11-net48.zip`. 로그인 없이 열린다.
 
@@ -259,11 +265,13 @@ v0.1.50-rc1은 이번 현장 시험 대상에서 제외했다. v0.1.51-rc1은 �
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-comparison-layout.ps1 -ExecutablePath src\RemoteMonitorSlave\bin\Release\net48\RemoteMonitorSlave.exe -OutputDirectory dist\comparison-layout -Comparison -OcrReplay
 ```
 
-패키지: 전체는 `dist/Remote-Monitor-v0.1.54-win7-win11-net48.zip`, Slave-only는 `dist/Remote-Monitor-Slave-v0.1.54-win11-net48.zip`. EXE/config를 함께 둔다. 프로그램명/버전은 제목 표시줄에서 확인한다. Master 연결 재개 시 양쪽 버전을 맞추며 **이번 시험에서는 기존 Master를 바꾸거나 연결하지 않는다.**
+패키지: 전체는 `dist/Remote-Monitor-v0.1.55-win7-win11-net48.zip`, Slave-only는 `dist/Remote-Monitor-Slave-v0.1.55-win11-net48.zip`. EXE/config를 함께 둔다. 프로그램명/버전은 제목 표시줄에서 확인한다. Master 연결 재개 시 양쪽 버전을 맞추며 **이번 시험에서는 기존 Master를 바꾸거나 연결하지 않는다.**
 
 현재 현장 절차는 SLAVE-TEST가 기준이다. 두 PowerSI 자동 수집1회 / 최초 수동 복사 없음 / 최대화·복원·크기 변경 없음 / PID별 결과 확인 / 진단 ZIP 하나 저장이다.
 
 ## 10. 검증 범위와 저장 정책
+
+**v0.1.55 로컬 검증 완료·CI/게시 대기:** Windows 양쪽 Release 빌드 경고/오류0, 실제 Master/Slave EXE 자체 검사 통과. 소유한 별도 스레드 창의 메시지 처리를150ms 지연시킨 검사에서 실제 전경 완료 동기화와 크기 불변을 확인했다(PASS, SKIP 아님). 무응답 대기 상한/거부 코드/취소와 빈 본문/첫·마지막 픽셀/모델 OCR 미호출/클릭 anchor 차단/로컬 상태 wire 미포함/PID별 원문·빈 화면 분리 검사를 포함한다. 독립 검토의 두 P2(빈 결과의 OCR 모드 오기록, Stop/timeout 시 완료한 빈 관측 유실)를 수정하고 Slave 빌드·EXE 검사를 다시 통과했다. 실제 비교 Form 오프스크린 렌더/표시 버전/native 선택값도 확인했다. 로컬 마우스·키보드 주입 검사는 전경 환경이 없어 SKIP이며 전경 동기화 검사와 구별한다. 새 rc의 CI 및 게시 파일은 확인 전이다. **실제 두 PowerSI 전환·자동 복사와 빈 Output 감지는 현장 미검증**이다.
 
 **v0.1.54 검증/게시 완료:** Windows 양쪽 빌드 경고/오류0 및 실제 Master/Slave 자체 검사 통과, 비교 Form 오프스크린 렌더/native 선택값 확인. 독립 창/입력 검토 후 Stop 정리 중 재실행 차단, OCR 실패 시 성공 원문 보존, 위치/OCR 모델·시간 연결, pre-copy 제안 이미지와 clean 이미지 구분을 보완했다. 마지막 보완을 포함한 정확한 소스 `2e39f0e`의 [배포 CI 34810869747](https://github.com/yunhyok/Remote-Control-App/actions/runs/34810869747)은 build/release 모두 성공했다. build job `103871778553`에서 실제 소유 시험 창의 클릭·Ctrl+A/C·선택 해제·반복 복사 검사와 두 대상 결과 선택/원문 대조/ZIP 분리/pending/Stop 보존 검사를 통과했다. 로컬 실제 입력 검사는 전경이 없어 SKIP했다. **CI의 합성 대상/소유 TextBox 검사는 실제 두 PowerSI 자동 수집의 현장 성공을 뜻하지 않는다.**
 
@@ -313,4 +321,4 @@ Master는 연결 파일/붙여넣기 값을 메모리에 유지한다. 두 프�
 
 ## 11. 다음 서비스 시작 안내
 
-HANDOFF.md와 SLAVE-TEST.md를 현재 기준으로 읽고 PROJECT-REVIEW.md는 이력으로 취급한다. v0.1.54 두 PowerSI 자동 수집 시험 결과를 먼저 확인한다. 최대화·복원·크기 변경 금지, 최초 수동 복사 제거, 모든 PID 결과 분리, Windows 무응답 입력 금지와 내부 pending 미판별 한계를 유지한다. PowerSI가 끝나면 HFSS와 모바일 발췌문 계약을 별도 설계한다. 현장 데이터를 Git/외부 모델에 올리지 않는다. 게시 상태는 최신 CI/Release를 확인하고 새 immutable rc로만 전달한다.
+HANDOFF.md와 SLAVE-TEST.md를 현재 기준으로 읽고 PROJECT-REVIEW.md는 이력으로 취급한다. v0.1.55의 내용 있는 PowerSI+빈 Output 자동 수집 시험 결과를 먼저 확인한다. 현장 결과에서 미완료 문제가 드러나면 필요한 수정·검증·다음 시험판까지 별도 진행 요청 없이 계속한다. 최대화·복원·크기 변경 금지, 최초 수동 복사 제거, 모든 PID 결과 분리, Windows 무응답 입력 금지와 내부 pending 미판별 한계를 유지한다. PowerSI가 끝나면 HFSS와 모바일 발췌문 계약을 별도 설계한다. 현장 데이터를 Git/외부 모델에 올리지 않는다. 게시 상태는 최신 CI/Release를 확인하고 새 immutable rc로만 전달한다.

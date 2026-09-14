@@ -610,6 +610,25 @@ namespace RemoteMonitorLink
             {
                 graphics.Clear(Color.DarkBlue);
                 graphics.FillRectangle(Brushes.DarkGray, 40, 140, 300, 240);
+                using (var emptyEncoded = new MemoryStream())
+                {
+                    bitmap.Save(emptyEncoded, System.Drawing.Imaging.ImageFormat.Png);
+                    var emptyFrame = new PowerSiFrame { Png = emptyEncoded.ToArray(), PixelSize = bitmap.Size, CapturedUtc = DateTime.UtcNow };
+                    foreach (bool locateOnly in new[] { false, true })
+                    using (var server = new TestServer(new[] { models, TestResponse("OUTPUT_BOX 200 450 800 800") }))
+                    {
+                        var empty = await PowerSiVision.CaptureAsync(null,
+                            new LocalVisionSettings { Enabled = true, Port = server.Port }, CancellationToken.None,
+                            null, emptyFrame, null, locateOnly).ConfigureAwait(false);
+                        await server.Completion.ConfigureAwait(false);
+                        Check(empty.LocalVisibleEmpty && empty.Code == "OUTPUT_UNAVAILABLE" && !empty.OutputExposed &&
+                            empty.LocalFailure == null && empty.LocalVisionMode == "LOCATE_ONLY" && empty.LocalImage != null && empty.LocalPaneImage != null &&
+                            ReferenceEquals(empty.LocalFrame, emptyFrame) && empty.LocalReadMs == 0 &&
+                            !PowerSiObservation.Parse(empty.Serialize()).LocalVisibleEmpty && server.Requests.Count == 2,
+                            "visible-empty keeps evidence, skips OCR, and never asserts a full empty buffer over wire");
+                    }
+                }
+                graphics.FillRectangle(Brushes.Black, 60, 160, 120, 2);
                 bitmap.Save(encoded, System.Drawing.Imaging.ImageFormat.Png);
                 var frame = new PowerSiFrame { Png = encoded.ToArray(), PixelSize = bitmap.Size, CapturedUtc = DateTime.UtcNow };
                 PowerSiObservation previous = null;

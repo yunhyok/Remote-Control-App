@@ -107,6 +107,7 @@ namespace RemoteMonitorSlave
             return " mode=" + (result.LocalVisionMode == "OCR_ONLY" ? "OCR_ONLY crop_reused=1" :
                 result.LocalVisionMode == "LOCATE_ONLY" ? "LOCATE_ONLY crop_reused=0" : "LOCATE_OCR crop_reused=0") +
                 " request_timeout_s=" + Math.Max(0, Math.Min(90, result.LocalRequestTimeoutSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                " visible_empty=" + (result.LocalVisibleEmpty ? "1" : "0") +
                 " transcript_policy=" + LocalVisionClient.TranscriptPolicy +
                 " thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=" + LocalVisionClient.ReadMaxTokens.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                 " sample=" + Id(result.LocalSampleId) + " ocr_sample=" + Id(result.LocalOcrSampleId) +

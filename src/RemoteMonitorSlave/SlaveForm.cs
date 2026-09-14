@@ -41,7 +41,7 @@ namespace RemoteMonitorSlave
             internal byte[] FailureFrame;
             internal string Failure;
             public override string ToString() { return "PID " + Process.Pid + " / " + (Buffer?.Code ?? "대기") + " / OCR " +
-                (Vision?.LocalFailure != null ? "실패 (상세 확인)" : Vision?.Code ?? "없음"); }
+                (Vision?.LocalVisibleEmpty == true ? "보이는 내용 없음" : Vision?.LocalFailure != null ? "실패 (상세 확인)" : Vision?.Code ?? "없음"); }
         }
         private readonly List<OutputSample> outputSamples = new List<OutputSample>();
         private OutputSample selectedSample;
@@ -561,11 +561,21 @@ namespace RemoteMonitorSlave
 
         private static void RecordTargetFailure(OutputSample sample, string code)
         {
+            if (sample.Buffer?.Code == "OUTPUT_VISIBLE_EMPTY" && sample.Vision?.LocalVisibleEmpty == true) return;
             // OCR failure is not a failed copy: keep the independently collected full buffer and its UTC.
             if (sample.Buffer?.Text == null)
                 sample.Buffer = new OutputBufferResult { Code = code, Method = "NONE", Detail = "NONE" };
             sample.Vision = sample.Vision ?? PowerSiObservation.VisionUnavailable("VISION_FAILED");
             sample.Vision.LocalFailure = code;
+        }
+
+        private static bool RecordVisibleEmpty(OutputSample sample, PowerSiObservation observation)
+        {
+            if (observation?.LocalVisibleEmpty != true) return false;
+            sample.Vision = observation;
+            sample.Buffer = new OutputBufferResult { Code = "OUTPUT_VISIBLE_EMPTY", Method = "SCREEN",
+                Detail = "FULL_BUFFER_UNCONFIRMED" };
+            return true;
         }
 
         private async Task ReadOutputBuffer()
@@ -616,7 +626,8 @@ namespace RemoteMonitorSlave
                             {
                                 if (hidden != null) await Task.Delay(300, deadline.Token);
                                 frame = hidden != null
-                                    ? await PowerSiScreenCapture.PrepareAsync(target, deadline.Token)
+                                    ? await PowerSiScreenCapture.PrepareAsync(target, deadline.Token,
+                                        detail => log.Write("OUTPUT_PREPARE", "pid=" + sample.Process.Pid + " " + detail))
                                     : await PowerSiScreenCapture.CaptureAsync(target, deadline.Token);
                                 sample.Buffer = await OutputBufferCapture.ReadAsync(target, deadline.Token);
                                 sample.ReceivedUtc = DateTime.UtcNow;
@@ -632,7 +643,8 @@ namespace RemoteMonitorSlave
                                     log.WritePowerSi(located);
                                     sample.Vision = located; // Preserve the locator frame/diagnostics even when no click is allowed.
                                     var anchor = OutputAutoCopy.AnchorFromVision(target, located);
-                                    if (anchor != null)
+                                    if (RecordVisibleEmpty(sample, located)) { /* No input or OCR for a visibly empty pane. */ }
+                                    else if (anchor != null)
                                     {
                                         log.Write("OUTPUT_AUTO_COPY_BEGIN", "pid=" + sample.Process.Pid + " self_hidden=1");
                                         sample.Buffer = await OutputAutoCopy.AutoCopyAsync(target, anchor, deadline.Token);
@@ -661,6 +673,7 @@ namespace RemoteMonitorSlave
                                 sample.Vision = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame, located);
                             else if (sample.Buffer.Text != null || sample.Vision == null && !sample.Buffer.Code.StartsWith("SC_", StringComparison.Ordinal))
                                 sample.Vision = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame);
+                            if (sample.Buffer.Text == null) RecordVisibleEmpty(sample, sample.Vision);
                         }
                         catch (OperationCanceledException)
                         {
@@ -689,11 +702,12 @@ namespace RemoteMonitorSlave
                     }
                 }
                 int copied = outputSamples.Count(item => item.Buffer.Text != null);
-                ShowActivity("전체 완료 — " + outputSamples.Count + "개 중 원문 " + copied + "개 / " +
+                int visibleEmpty = outputSamples.Count(item => item.Vision?.LocalVisibleEmpty == true);
+                ShowActivity("전체 완료 — " + outputSamples.Count + "개 중 원문 " + copied + "개 / 보이는 내용 없음 " + visibleEmpty + "개 / " +
                     clock.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
                     "초. PID별 결과 확인 후 진단 ZIP 한 번 저장하세요." +
                     (inventory.Omitted > 0 ? " 목록 한도 밖 " + inventory.Omitted + "개는 미수집입니다." : ""));
-                log.Write("OUTPUT_BATCH_COMPLETE", "targets=" + outputSamples.Count + " text=" + copied + " omitted=" + inventory.Omitted);
+                log.Write("OUTPUT_BATCH_COMPLETE", "targets=" + outputSamples.Count + " text=" + copied + " visible_empty=" + visibleEmpty + " omitted=" + inventory.Omitted);
             }
             catch (OperationCanceledException)
             {
@@ -740,7 +754,8 @@ namespace RemoteMonitorSlave
             visionPreview.Enabled = vision != null; // The comparison is a snapshot; enable only after both paths finish.
             powerSi.Text = "출처: " + result.Method + " / " + result.Code + " / " + result.CharacterCount.ToString(CultureInfo.InvariantCulture) +
                 "자 / " + result.LineCount.ToString(CultureInfo.InvariantCulture) + "줄 / LLM " + (vision?.Code ?? "대기 중") + "\r\n" +
-                (result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
+                (result.Code == "OUTPUT_VISIBLE_EMPTY" ? "보이는 Output 내용 없음 — 전체 버퍼 미확인, 클릭·복사·OCR 생략.\r\n" :
+                    result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
                     result.Method == "AUTO_CLIPBOARD" ? "자동 복사본 — 선택 해제 → 판독용 캡처 → Ctrl+A/C → 선택 해제. 클립보드가 바뀌었습니다.\r\n" :
                     result.Method == "PREVIOUS_CAPTURE" ? "이번 자동 복사 실패 — 이전 수집본을 참고용으로 유지합니다. 현재 화면보다 오래된 내용입니다.\r\n" :
                     "컨트롤이 현재 보유한 텍스트입니다. 과거에 버린 로그까지 복원하는 것은 아닙니다.\r\n") +
@@ -751,7 +766,8 @@ namespace RemoteMonitorSlave
 
         private bool CanReplayVision()
         {
-            return !closing && !busy && !batchInProgress && server == null && snapshotCancellation == null && lastBuffer != null && lastObservation?.LocalFrame != null;
+            return !closing && !busy && !batchInProgress && server == null && snapshotCancellation == null && lastBuffer != null &&
+                lastObservation?.LocalFrame != null && !lastObservation.LocalVisibleEmpty;
         }
 
         private async Task ReplayVision()
@@ -966,7 +982,7 @@ namespace RemoteMonitorSlave
                     Mode = run.LocalVisionMode,
                     RegionInfo = run.LocalRegionInfo,
                     BodyDiagnostics = run.LocalBodyDiagnostics,
-                    Result = run.Code,
+                    Result = run.LocalVisibleEmpty ? "OUTPUT_VISIBLE_EMPTY" : run.Code,
                     FailureCode = run.LocalFailure,
                     FullFramePng = run.LocalFullImage,
                     SuggestedPng = run.LocalSuggestedImage,
@@ -1041,7 +1057,9 @@ namespace RemoteMonitorSlave
                     dialog.Controls.Add(columns); columns.SplitterDistance = 590;
                     columns.Panel1.Controls.Add(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, WordWrap = false,
                         ScrollBars = ScrollBars.Both, MaxLength = OutputBufferCapture.MaxCharacters,
-                        Text = lastBuffer.Text ?? "미수집: " + lastBuffer.Code + "\r\n" + lastBuffer.Detail });
+                        Text = lastBuffer.Text ?? (lastBuffer.Code == "OUTPUT_VISIBLE_EMPTY" ?
+                            "보이는 Output 내용 없음\r\n전체 버퍼는 미확인입니다. 불필요한 클릭·복사·OCR은 생략했습니다." :
+                            "미수집: " + lastBuffer.Code + "\r\n" + lastBuffer.Detail) });
                     columns.Panel1.Controls.Add(new Label { Dock = DockStyle.Top, Height = 54,
                         Text = (lastBuffer.Method == "PREVIOUS_CAPTURE" ? "이전 참고 원문 (이번 자동 복사 실패)" : "전체 텍스트") + " / " + lastBuffer.Method + "\r\n수집 완료 UTC " + lastBufferReceivedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
                             " (버퍼 원자적 캡처 시각 아님)" });
@@ -1702,6 +1720,27 @@ namespace RemoteMonitorSlave
                     if (batch.Targets.Count != 2 || batch.Targets[0].FullText != copiedBuffer.Text || batch.Targets[1].FullText != null ||
                         batch.Targets[1].BufferCode != "SC_PENDING" || batch.Targets[1].Runs[0].Transcript != null)
                         throw new InvalidOperationException("Pending/Stop lost prior targets or reused another target's text.");
+                    var emptyVision = PowerSiObservation.VisionLogExcerpt(null, DateTime.UtcNow);
+                    emptyVision.LocalVisibleEmpty = true;
+                    emptyVision.LocalFrame = anchorVision.LocalFrame;
+                    emptyVision.LocalFullImage = anchorVision.LocalFullImage;
+                    emptyVision.LocalImage = anchorVision.LocalImage;
+                    if (!RecordVisibleEmpty(second, emptyVision) || RecordVisibleEmpty(first, anchorVision))
+                        throw new InvalidOperationException("Visible-empty routing changed a nonempty target.");
+                    foreach (var failure in new[] { "TARGET_CANCELLED", "TARGET_TIMEOUT" }) RecordTargetFailure(second, failure);
+                    if (second.Buffer.Code != "OUTPUT_VISIBLE_EMPTY" || second.Buffer.Text != null || second.Vision.LocalFailure != null)
+                        throw new InvalidOperationException("Stop or timeout discarded a completed visible-empty observation.");
+                    second.Runs.Clear(); second.Runs.Add(emptyVision);
+                    form.selectedSample = null;
+                    form.SelectOutputSample(second);
+                    batch = form.BuildExportContent(null);
+                    if (form.CanReplayVision() || form.ComparisonFor(emptyVision) != null ||
+                        second.Buffer.Text != null || !second.ToString().Contains("보이는 내용 없음") ||
+                        batch.Targets[0].FullText != copiedBuffer.Text || batch.Targets[1].FullText != null ||
+                        batch.Targets[1].BufferCode != "OUTPUT_VISIBLE_EMPTY" || batch.Targets[1].Runs[0].Result != "OUTPUT_VISIBLE_EMPTY" ||
+                        batch.Targets[1].Runs[0].Transcript != null || !SlaveLog.ComparisonMetadata(emptyVision).Contains("visible_empty=1"))
+                        throw new InvalidOperationException("Visible-empty evidence became full text, OCR success, or another PID's data.");
+                    Console.WriteLine("PASS: visible-empty target stays distinct from full-buffer success and preserves the other PID");
                     var copyTime = first.ReceivedUtc;
                     RecordTargetFailure(first, "TARGET_TIMEOUT");
                     if (first.Buffer.Text != copiedBuffer.Text || first.ReceivedUtc != copyTime || first.Vision.LocalFailure != "TARGET_TIMEOUT" ||

@@ -211,7 +211,7 @@ namespace RemoteMonitorSlave
                     located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || !located.CapturedUtc.HasValue ||
                     located.LocalFrame == null || located.LocalFrame.Png == null || located.LocalImage == null ||
                     located.LocalPaneImage == null || !ReferenceEquals(located.LocalFullImage, located.LocalFrame.Png) ||
-                    located.LocalFrameSize != located.LocalFrame.PixelSize || located.LocalFrameSize.IsEmpty ||
+                    located.LocalFrameSize != located.LocalFrame.PixelSize || located.LocalFrameSize.IsEmpty || located.LocalVisibleEmpty ||
                     located.LocalFrame.CapturedUtc != located.CapturedUtc.Value) return null;
                 var body = located.LocalOutputBody;
                 var size = located.LocalFrameSize;
@@ -800,6 +800,9 @@ namespace RemoteMonitorSlave
                 anchor.ClientSize == size && anchor.Body == body && anchor.ClientPoint == new Point(609, 673) &&
                 anchor.LearnedUtc == captured && anchor.Serialize().StartsWith("A2|", StringComparison.Ordinal),
                 "locator result becomes a validated A2 centre anchor");
+            located.LocalVisibleEmpty = true;
+            Need(AnchorFromVision(inventory, located) == null, "visibly empty pane never authorizes input");
+            located.LocalVisibleEmpty = false;
 
             Need(AnchorFromVision(null, located) == null && AnchorFromVision(inventory, null) == null &&
                 AnchorFromVision(inventory, Located(Rectangle.Empty, size)) == null,

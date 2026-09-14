@@ -53,7 +53,7 @@ namespace RemoteMonitorLink
                 result.LocalBodyDiagnostics = bodyDiagnostics;
                 result.LocalFrameSize = frame == null ? Size.Empty : frame.PixelSize;
                 result.LocalOutputBody = outputBody;
-                result.LocalVisionMode = locateOnly ? "LOCATE_ONLY" : savedCrop == null || joinedLocate ? "LOCATE_OCR" : "OCR_ONLY";
+                result.LocalVisionMode = locateOnly || result.LocalVisibleEmpty ? "LOCATE_ONLY" : savedCrop == null || joinedLocate ? "LOCATE_OCR" : "OCR_ONLY";
                 result.LocalRequestTimeoutSeconds = settings.TimeoutSeconds;
                 result.LocalElapsedMs = priorElapsedMs + elapsed.ElapsedMilliseconds;
                 result.LocalLocateMs = stage == "LOCATE_OUTPUT" ? phaseClock.ElapsedMilliseconds : locateMs;
@@ -120,6 +120,14 @@ namespace RemoteMonitorLink
                         captureInfo = string.Format(System.Globalization.CultureInfo.InvariantCulture,
                             "원본 {0}×{1}px / LLM 제안 {2} / 본문 경계 {3}\r\nOCR: 본문 하단 {4}px ×{5} 확대 / 영역·숫자 정확도 미검증",
                             frame.PixelSize.Width, frame.PixelSize.Height, Box(region.Bounds), Box(body), ocrSize.Height, scale);
+                        if (OutputPaneImage.IsVisiblyEmpty(frame, body, deadline.Token))
+                        {
+                            var empty = PowerSiObservation.VisionLogExcerpt(null, frame.CapturedUtc);
+                            empty.LocalVisibleEmpty = true;
+                            empty.LocalEvidence = "확인된 Output 화면 영역에 보이는 내용이 없습니다.\r\n" +
+                                "화면 판정이며 전체 버퍼·과거 로그가 비어 있다는 뜻은 아닙니다. 클릭·복사·OCR은 생략했습니다.";
+                            return Finish(empty);
+                        }
                         if (locateOnly)
                         {
                             stage = "LOCATE_ONLY"; progress?.Report(stage);
@@ -168,7 +176,7 @@ namespace RemoteMonitorLink
         internal static PowerSiObservation ReframeOutput(PowerSiObservation located, PowerSiFrame cleanFrame)
         {
             if (located == null || cleanFrame == null || cleanFrame.Png == null || located.Code != "OUTPUT_UNAVAILABLE" ||
-                located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || !located.CapturedUtc.HasValue ||
+                located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || located.LocalVisibleEmpty || !located.CapturedUtc.HasValue ||
                 located.LocalFrame == null || located.LocalFrameSize.IsEmpty || located.LocalOutputBody.IsEmpty ||
                 located.LocalFullImage == null || located.LocalImage == null || located.LocalPaneImage == null ||
                 !ReferenceEquals(located.LocalFullImage, located.LocalFrame.Png) ||
