@@ -1,6 +1,6 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.56 대상 준비 후 Slave 최소화·창 식별 진단 / 로컬 검증 완료·CI/게시 대기 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.56 대상 준비 후 Slave 최소화·창 식별 진단 / 로컬·CI·v0.1.56-rc1 게시 파일 검증 완료 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
@@ -19,7 +19,7 @@
 - 현장 확인은 **한 번의 새 화면 두 방식 비교**다. 마우스 오버·수동 복사·Master·resize·장시간 대기·사용자 SELF-TEST를 요구하지 않는다. Ansys HFSS는 PowerSI 수집 정리 후다.
 - **Output 발췌문의 모바일 전달과 복수 PID wire 계약은 아직 미구현**이다. 로컬 수집 성공과 기본 통신 성공을 합쳐 이미 전달된다고 말하지 않는다.
 - 사내 이미지/원문은 Slave의 loopback LM Studio 및 메모리/사용자 요청 ZIP에만 둔다. Git·외부 모델·클라우드 fallback 금지.
-- 직전 게시판 [v0.1.55-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.55-rc1)의 익명 다운로드·해시·EXE 버전을 확인했다. 태그 소스는 `862b5d29dede4e0ed0548aae24841129a8858395`다. v0.1.56 게시 검증은 §10에 기록한다. 실제 두 PowerSI 자동 수집 성공은 아직 확인하지 않았다. 변경 브랜치는 codex/slave-v0.1.51-guarded-copy / PR #3이며 main 병합은 별도다.
+- [v0.1.56-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.56-rc1)의 익명 다운로드·해시·EXE 버전을 확인했다. 태그 소스는 `c2a08b4206d94f9a4eda36fca2f695c7357c7b8d`다. 게시 검증은 §10에 기록한다. 실제 두 PowerSI 자동 수집 성공은 아직 확인하지 않았다. 변경 브랜치는 codex/slave-v0.1.51-guarded-copy / PR #3이며 main 병합은 별도다.
 
 ## 2. 프로젝트가 해결하려는 일
 
@@ -249,6 +249,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.56-rc1` | `c2a08b4` | `Remote-Monitor-Slave-v0.1.56-win11-net48.zip` | `A02F7BB4DD454125C7317F9FE4669643683AD28699B1CB7C00B6DFBE9105B9F9` |
+| | | `Remote-Monitor-v0.1.56-win7-win11-net48.zip` | `69935099174F39D24BF01CDFB93D876BC84F195CDE26A8C834762D3942296000` |
 | `v0.1.55-rc1` | `862b5d2` | `Remote-Monitor-Slave-v0.1.55-win11-net48.zip` | `4C06F95D0B24F43465F78181D357F943B7564BACF0B18501D4436B3B2CA9CF18` |
 | | | `Remote-Monitor-v0.1.55-win7-win11-net48.zip` | `2BCCD7B8C13311DEB265426A0FA212625B64FB2421214C039C29A81BB4F68FB5` |
 | `v0.1.54-rc1` | `2e39f0e` | `Remote-Monitor-Slave-v0.1.54-win11-net48.zip` | `237D8C0A38A548A70CD943FF0FE8EEC774A483EA60B435A9FA0951A9D2BC3390` |
@@ -278,7 +280,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.56 로컬 검증 완료:** Windows 양쪽 Release 경고/오류0 및 실제 EXE 자체 검사를 통과했다. 다른 PID 100개를 제외하는 선택 검사, 소유한 no-activate 실제 창의 최소화/비최소화 판정·네이티브 열거·거부 시 전경 불변, 숫자 진단 필터·음수 좌표 보존·UI 설명을 확인했다. 로컬 교차 큐 활성화/실제 마우스·키 입력은 전경 환경이 없어 SKIP했다. 독립 검토에서 순서 변경은 적절하지만 SC_MINIMIZED 관측 불일치의 확정 원인은 아니라는 점과, 진단 IO 실패가 실제 결과를 바꾸지 않도록 보완할 점을 확인했다. 후자를 수정하고 닫힌 진단 스트림 검사를 추가한 최종 소스로 양쪽 빌드/EXE 자체 검사를 다시 통과했다. CI/게시 파일 확인은 대기 중이다. 회사 PowerSI 두 개를 재현한 시험은 아니며 현장 검증을 대체하지 않는다.
+**v0.1.56 검증/게시 완료:** Windows 양쪽 Release 경고/오류0 및 실제 EXE 자체 검사를 통과했다. 다른 PID 100개를 제외하는 선택 검사, 소유한 no-activate 실제 창의 최소화/비최소화 판정·네이티브 열거·거부 시 전경 불변, 숫자 진단 필터·음수 좌표 보존·UI 설명을 확인했다. 로컬 교차 큐 활성화/실제 마우스·키 입력은 전경 환경이 없어 SKIP했다. 독립 검토에서 순서 변경은 적절하지만 SC_MINIMIZED 관측 불일치의 확정 원인은 아니라는 점과, 진단 IO 실패가 실제 결과를 바꾸지 않도록 보완할 점을 확인했다. 후자를 수정하고 닫힌 진단 스트림 검사를 추가한 최종 소스로 양쪽 빌드/EXE 자체 검사를 다시 통과했다. [최종 소스 배포 CI 34815428056](https://github.com/yunhyok/Remote-Control-App/actions/runs/34815428056)은 build/release 모두 성공했다. build job `103884998319`에서 새 창 상태 검사·교차 큐 전경 완료·소유 TextBox의 실제 클릭/Ctrl+A/C/선택 해제/반복 복사와 PID별 결과 검사가 모두 PASS였다. 회사 PowerSI 두 개를 재현한 시험은 아니며 현장 검증을 대체하지 않는다.
+
+v0.1.56-rc1의 두 ZIP과 SHA256SUMS.txt를 인증 헤더 없이 내려받아 Release API digest 및 파일 해시에 대조했다. Slave ZIP은185,092바이트/5파일, 전체 ZIP은420,216바이트/8파일이고 예상 EXE/config/문서만 들어 있다. 두 EXE의 FileVersion은 `0.1.56.0`, ProductVersion은 `0.1.56+c2a08b4206d94f9a4eda36fca2f695c7357c7b8d`이며 원격 태그도 같은 소스다. ZIP 안 HANDOFF의 게시 대기는 빌드 전 기록이며 이 후속 문서가 최종 검증 기록이다. 태그/배포 자산은 변경하지 않았다.
 
 **v0.1.55 검증/게시 완료:** Windows 양쪽 Release 빌드 경고/오류0, 실제 Master/Slave EXE 자체 검사 통과. 소유한 별도 스레드 창의 메시지 처리를150ms 지연시킨 검사에서 실제 전경 완료 동기화와 크기 불변을 확인했다(PASS, SKIP 아님). 무응답 대기 상한/거부 코드/취소와 빈 본문/첫·마지막 픽셀/모델 OCR 미호출/클릭 anchor 차단/로컬 상태 wire 미포함/PID별 원문·빈 화면 분리 검사를 포함한다. 독립 검토의 두 P2(빈 결과의 OCR 모드 오기록, Stop/timeout 시 완료한 빈 관측 유실)를 수정하고 Slave 빌드·EXE 검사를 다시 통과했다. 실제 비교 Form 오프스크린 렌더/표시 버전/native 선택값도 확인했다. 로컬 마우스·키보드 주입 검사는 전경 환경이 없어 SKIP이며 전경 동기화 검사와 구별한다. 최종 소스 `862b5d2`의 [배포 CI 34813273775](https://github.com/yunhyok/Remote-Control-App/actions/runs/34813273775)은 build/release 모두 성공했다. build job `103878663753`은 교차 큐 전경 동기화, 소유한 TextBox의 실제 클릭/Ctrl+A/C/선택 정리/반복 복사, 빈 결과 및 두 PID 독립 보존을 모두 PASS했다. **실제 두 PowerSI 전환·자동 복사와 빈 Output 감지는 현장 미검증**이다.
 
