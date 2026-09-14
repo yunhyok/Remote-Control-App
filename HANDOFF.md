@@ -1,6 +1,6 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.54 복수 PowerSI 자동 시작 구현 / 개발 검증·게시 진행 중**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.54 복수 PowerSI 자동 시작 구현 / 개발 검증·v0.1.54-rc1 게시 완료 / 두 PowerSI 현장 시험 대기**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
@@ -14,7 +14,7 @@
 - 현장 확인은 **한 번의 새 화면 두 방식 비교**다. 마우스 오버·수동 복사·Master·resize·장시간 대기·사용자 SELF-TEST를 요구하지 않는다. Ansys HFSS는 PowerSI 수집 정리 후다.
 - **Output 발췌문의 모바일 전달과 복수 PID wire 계약은 아직 미구현**이다. 로컬 수집 성공과 기본 통신 성공을 합쳐 이미 전달된다고 말하지 않는다.
 - 사내 이미지/원문은 Slave의 loopback LM Studio 및 메모리/사용자 요청 ZIP에만 둔다. Git·외부 모델·클라우드 fallback 금지.
-- 게시 전까지 v0.1.54 다운로드 가능/현장 성공이라고 말하지 않는다. 현재 원격 확인된 이전 릴리스는 [v0.1.53-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.53-rc1), 소스 abe15eb5236d68443627430bdaeb5d71c39189f8이다. 변경 브랜치는 codex/slave-v0.1.51-guarded-copy / PR #3이며 main 병합은 별도다.
+- [v0.1.54-rc1](https://github.com/yunhyok/Remote-Control-App/releases/tag/v0.1.54-rc1) 게시와 익명 다운로드·해시·EXE 버전을 확인했다. 태그 소스는 `2e39f0ebbb6e82c7bbceada4e74137ea89debd53`이다. 실제 두 PowerSI 자동 수집 성공은 아직 확인하지 않았다. 변경 브랜치는 codex/slave-v0.1.51-guarded-copy / PR #3이며 main 병합은 별도다.
 
 ## 2. 프로젝트가 해결하려는 일
 
@@ -73,7 +73,8 @@ Master는 **사람 목록이 붙은 통합 채팅창이 아닌 별도 개별 자
 | v0.1.50 | 자동 복사 중 자기 창 최소화·가린 창 식별, 클릭 후 캡처 순서, 실패 화면 보존, 본문 포함 규칙, 모델 thinking 비활성화 | v0.1.49 현장 실패 원인만 겨냥. 전부 현장 미검증 |
 | v0.1.51 | 입력 전 본문 확인·협력 취소·새 clipboard 기준·반복 행 대조·실제 전사 행 보존 | v0.1.50 시험 생략. 현장에서 단발 자동 복사 성공, OCR은18줄 중 앞12줄만 반환. 연속 무인 복사는 미완료 |
 | v0.1.52 | OCR 입력의 모든 줄 요청·전사 절단 제거·실제 입력 기본 표시·요청 정책 메타데이터 | 현장 성공4결과 모두18줄 전사, 숫자·문자 일치. 자동 복사6/8, 가림2회. 모든 실행 thinking OFF 사용자 확인 |
-| v0.1.53 | 좌표 접두부 생략 허용·거부 응답 분리·재판독 표시·자동 선택 정리와 깨끗한 OCR 프레임 | 로컬 검증 통과, CI/게시 대기. Qwen3-VL 8B로 새 앱 수동 학습 후 자동 비교1회가 다음 현장 확인 |
+| v0.1.53 | 좌표 접두부 생략 허용·거부 응답 분리·재판독 표시·자동 선택 정리와 깨끗한 OCR 프레임 | 검증·게시 완료. Qwen3-VL 8B 수동 비교18줄 일치 확인, 새 자동 선택 정리는 해당 현장 ZIP에서 미실행 |
+| v0.1.54 | 최초 수동 선택 없는 복수 PID 수집·전경 전환만 허용·Windows 무응답 검사·PID별 결과와 ZIP | 검증·게시 완료. 사용자가 준비한 두 PowerSI를 한 번에 자동 수집하는 현장 시험 대기 |
 
 v0.1.33의 Slave `STATUS_SENT` 6회는 직접 상태 조회 1회와 모바일 5회를 합친 것이다. 모바일 답장 6회로 쓰지 않는다. 다섯 번째 성공 뒤 `STATUS_TARGET_CHANGED`는 다음 요청 대기 중의 안전 중단이며 앞선 5회 실패를 뜻하지 않는다. 상세 근거/당시 제한은 PROJECT-REVIEW의 해당 절에 있다.
 
@@ -237,6 +238,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.54-rc1` | `2e39f0e` | `Remote-Monitor-Slave-v0.1.54-win11-net48.zip` | `237D8C0A38A548A70CD943FF0FE8EEC774A483EA60B435A9FA0951A9D2BC3390` |
+| | | `Remote-Monitor-v0.1.54-win7-win11-net48.zip` | `BC154E75974B4C300E7696DB554194C8EB3D57131CF93127413610153AB705D4` |
 | `v0.1.53-rc1` | `abe15eb` | `Remote-Monitor-Slave-v0.1.53-win11-net48.zip` | `ADCFCEBD116EAAD299AEE0A0936B98CF0847F8ABF7198AF2005F15DDB9073C7D` |
 | | | `Remote-Monitor-v0.1.53-win7-win11-net48.zip` | `06315D8426A0CB4B827A73251394DBD370EE24ABA93D7E9D0DC1D236FBCFE8C6` |
 | `v0.1.52-rc1` | `e7a1989` | `Remote-Monitor-Slave-v0.1.52-win11-net48.zip` | `39527E0943C732BDCA57C1BDF9A75A6FED6CCB396009CFEF3203A888DC8E50A8` |
@@ -262,7 +265,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.54: Windows 양쪽 빌드 경고/오류0 및 실제 Master/Slave 자체 검사 통과, 비교 Form 오프스크린 렌더/native 선택값 확인.** 독립 창/입력 검토 후 Stop 정리 중 재실행 차단, OCR 실패 시 성공 원문 보존, 위치/OCR 모델·시간 연결, pre-copy 제안 이미지와 clean 이미지 구분을 보완했다. 마지막 보완은 최종 배포 CI에서 다시 검증한다. 준비된 새 rc의 CI/게시 확인 전이다. 실제 두 PowerSI 자동 수집은 현장 미검증이며 로컬 실제 클릭 시험은 전경 권한이 없어 SKIP했다. 기존 성공을 새 경로 성공으로 간주하지 않는다.
+**v0.1.54 검증/게시 완료:** Windows 양쪽 빌드 경고/오류0 및 실제 Master/Slave 자체 검사 통과, 비교 Form 오프스크린 렌더/native 선택값 확인. 독립 창/입력 검토 후 Stop 정리 중 재실행 차단, OCR 실패 시 성공 원문 보존, 위치/OCR 모델·시간 연결, pre-copy 제안 이미지와 clean 이미지 구분을 보완했다. 마지막 보완을 포함한 정확한 소스 `2e39f0e`의 [배포 CI 34810869747](https://github.com/yunhyok/Remote-Control-App/actions/runs/34810869747)은 build/release 모두 성공했다. build job `103871778553`에서 실제 소유 시험 창의 클릭·Ctrl+A/C·선택 해제·반복 복사 검사와 두 대상 결과 선택/원문 대조/ZIP 분리/pending/Stop 보존 검사를 통과했다. 로컬 실제 입력 검사는 전경이 없어 SKIP했다. **CI의 합성 대상/소유 TextBox 검사는 실제 두 PowerSI 자동 수집의 현장 성공을 뜻하지 않는다.**
+
+v0.1.54-rc1의 두 ZIP과 SHA256SUMS.txt를 인증 헤더 없이 내려받아 Release API digest 및 파일 해시와 대조했다. Slave ZIP은176,294바이트, EXE/config/README/HANDOFF/SLAVE-TEST의5파일이며 전체 ZIP은408,137바이트/8파일이다. 두 EXE의 FileVersion은 `0.1.54.0`, ProductVersion은 `0.1.54+2e39f0ebbb6e82c7bbceada4e74137ea89debd53`이고 원격 태그도 같은 소스다. ZIP 안 HANDOFF의 게시 대기는 빌드 시점 기록이며 이 후속 문서가 최종 게시 검증 기록이다. 태그와 배포 파일은 변경하지 않았다.
 
 **v0.1.53 검증/게시 완료:** Windows 로컬 및 [최종 소스 배포 CI](https://github.com/yunhyok/Remote-Control-App/actions/runs/34802696478)에서 양쪽 Release 빌드 경고·오류0, 실제 Master/Slave EXE 자체 검사 통과. 로컬에서는 실제 비교 Form의 레이아웃도 확인했다. 최대8Mi문자 원문+실제 PNG의 결합 응답, 깨끗한 PNG/원래 UTC 보존, 기존 입력 보호·취소, 좌표 형식/잘못된 영역, 거부 응답을 전사·대조 ZIP에서 제외하는 검사 등을 포함한다. 독립 검토의 결합 응답 상한·지연 시작 판독 제한 문제를 수정한 후 Slave를 다시 검사했다. 로컬 실제 입력은 전경이 없어 SKIP했지만 CI build job `103848392415`에서는 `PASS: live input test (click + Ctrl+A + Ctrl+C + deselect; repeated copy exact)`였다. 이는 소유한 검사용 TextBox의 실제 입력/선택 정리 검사이며 PowerSI 현장 확인을 대체하지 않는다.
 
