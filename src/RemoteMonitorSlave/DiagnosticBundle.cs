@@ -71,6 +71,9 @@ namespace RemoteMonitorSlave
         internal string AutoCopyLastFailure;
         internal List<DiagnosticBundleRun> Runs = new List<DiagnosticBundleRun>();
         internal string Notes;
+        internal int? TargetPid, TargetSessionId;
+        internal long? TargetStartUtcTicks;
+        internal List<DiagnosticBundleContent> Targets = new List<DiagnosticBundleContent>();
     }
 
     internal static class DiagnosticBundle
@@ -96,6 +99,23 @@ namespace RemoteMonitorSlave
         {
             if (target == null) throw new ArgumentNullException("target");
             if (content == null) throw new ArgumentNullException("content");
+            if (content.Targets.Any(item => item == null || item.TargetPid.GetValueOrDefault() < 1 ||
+                item.TargetSessionId.GetValueOrDefault(-1) < 0 || item.Targets.Count != 0) ||
+                content.Targets.Select(item => item.TargetPid).Distinct().Count() != content.Targets.Count)
+                throw new InvalidDataException("Invalid diagnostic target identities.");
+            using (var archive = new ZipArchive(target, ZipArchiveMode.Create, true))
+            {
+                WriteContent(archive, content, "");
+                for (int index = 0; index < content.Targets.Count; index++)
+                    WriteContent(archive, content.Targets[index], TargetDirectory(index, content.Targets[index]));
+            }
+        }
+
+        private static string TargetDirectory(int index, DiagnosticBundleContent target)
+        { return "targets/" + (index + 1).ToString("D2", CultureInfo.InvariantCulture) + "-pid" + target.TargetPid.Value.ToString(CultureInfo.InvariantCulture) + "/"; }
+
+        private static void WriteContent(ZipArchive archive, DiagnosticBundleContent content, string prefix)
+        {
             var runs = content.Runs ?? new List<DiagnosticBundleRun>();
 
             byte[] logBytes = null;
@@ -112,7 +132,7 @@ namespace RemoteMonitorSlave
             for (var i = 0; i < runs.Count; i++)
             {
                 var run = runs[i] ?? new DiagnosticBundleRun();
-                var dir = "runs/" + (i + 1).ToString("D2", CultureInfo.InvariantCulture) + "-" + SanitizeLabel(run.Label) + "/";
+                var dir = prefix + "runs/" + (i + 1).ToString("D2", CultureInfo.InvariantCulture) + "-" + SanitizeLabel(run.Label) + "/";
                 runDirs[i] = dir;
 
                 var images = new Dictionary<string, object>();
@@ -138,10 +158,13 @@ namespace RemoteMonitorSlave
             }
 
             var autoCopyImages = new Dictionary<string, object>();
-            AddImageManifest(autoCopyImages, "auto_copy_frame", "auto-copy-frame.png", content.AutoCopyFramePng);
+            AddImageManifest(autoCopyImages, "auto_copy_frame", prefix + "auto-copy-frame.png", content.AutoCopyFramePng);
 
             var manifest = new Dictionary<string, object> {
                 { "version", content.Version }, { "created_utc", content.CreatedUtc.ToString("o", CultureInfo.InvariantCulture) },
+                { "target_pid", content.TargetPid }, { "target_start_utc_ticks", content.TargetStartUtcTicks }, { "target_session_id", content.TargetSessionId },
+                { "targets", content.Targets.Select((item, index) => new { pid = item.TargetPid, start_utc_ticks = item.TargetStartUtcTicks,
+                    session_id = item.TargetSessionId, entry_dir = TargetDirectory(index, item), result = item.BufferCode }).ToArray() },
                 { "buffer_code", content.BufferCode }, { "buffer_method", content.BufferMethod }, { "buffer_detail", content.BufferDetail },
                 { "buffer_received_utc", content.BufferReceivedUtc?.ToString("o", CultureInfo.InvariantCulture) },
                 { "full_text_included", content.FullText != null }, { "log_included", logBytes != null },
@@ -149,13 +172,12 @@ namespace RemoteMonitorSlave
                 { "notes", content.Notes }, { "runs", manifestRuns } };
             var manifestText = Serialize(manifest);
 
-            using (var archive = new ZipArchive(target, ZipArchiveMode.Create, true))
             {
-                WriteTextEntry(archive, "README.txt", ReadmeText, false);
-                WriteTextEntry(archive, "manifest.json", manifestText, false);
-                if (content.FullText != null) WriteTextEntry(archive, "full-text.txt", content.FullText, true);
-                if (logBytes != null) WriteBinaryEntry(archive, "slave-log.txt", logBytes);
-                if (content.AutoCopyFramePng != null) WriteBinaryEntry(archive, "auto-copy-frame.png", content.AutoCopyFramePng);
+                if (prefix.Length == 0) WriteTextEntry(archive, "README.txt", ReadmeText + "여러 PowerSI 결과는 targets/NN-pidPID/ 아래 서로 분리되어 있습니다.\r\n", false);
+                WriteTextEntry(archive, prefix + "manifest.json", manifestText, false);
+                if (content.FullText != null) WriteTextEntry(archive, prefix + "full-text.txt", content.FullText, true);
+                if (logBytes != null) WriteBinaryEntry(archive, prefix + "slave-log.txt", logBytes);
+                if (content.AutoCopyFramePng != null) WriteBinaryEntry(archive, prefix + "auto-copy-frame.png", content.AutoCopyFramePng);
                 for (var i = 0; i < runs.Count; i++)
                 {
                     var run = runs[i] ?? new DiagnosticBundleRun();

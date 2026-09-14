@@ -628,6 +628,43 @@ namespace RemoteMonitorLink
                             result.LocalImage.SequenceEqual(previous.LocalImage), "model swap reuses identical full and OCR images");
                     previous = result;
                 }
+                PowerSiObservation locatedOnly;
+                using (var server = new TestServer(new[] { models, TestResponse("OUTPUT_BOX 200 450 800 800") }))
+                {
+                    locatedOnly = await PowerSiVision.CaptureAsync(null,
+                        new LocalVisionSettings { Enabled = true, Port = server.Port }, CancellationToken.None,
+                        null, frame, null, true).ConfigureAwait(false);
+                    await server.Completion.ConfigureAwait(false);
+                    Check(locatedOnly.Code == "OUTPUT_UNAVAILABLE" && locatedOnly.CapturedUtc == frame.CapturedUtc &&
+                        locatedOnly.LocalFailure == null && locatedOnly.LocalVisionMode == "LOCATE_ONLY" &&
+                        locatedOnly.LocalOutputBody == new Rectangle(40, 140, 300, 240) && locatedOnly.LocalImage != null &&
+                        ReferenceEquals(locatedOnly.LocalFrame, frame) && locatedOnly.LocalModelInfo.Id == "local-test" &&
+                        server.Requests.Count == 2 && server.Requests[1].StartsWith("POST /v1/chat/completions ", StringComparison.Ordinal),
+                        "locate-only validates and crops the Output body without making an OCR request");
+                }
+                var cleanFrame = new PowerSiFrame { Png = frame.Png.ToArray(), PixelSize = frame.PixelSize,
+                    CapturedUtc = frame.CapturedUtc.AddSeconds(1) };
+                var reframed = PowerSiVision.ReframeOutput(locatedOnly, cleanFrame);
+                Check(ReferenceEquals(reframed.LocalFrame, cleanFrame) && ReferenceEquals(reframed.LocalFullImage, cleanFrame.Png) &&
+                    reframed.CapturedUtc == cleanFrame.CapturedUtc && reframed.LocalOutputBody == locatedOnly.LocalOutputBody &&
+                    reframed.LocalImage != null && reframed.LocalPaneImage != null && reframed.LocalSampleId == null &&
+                    reframed.LocalOcrSampleId == null && reframed.LocalSuggestedImage == null &&
+                    reframed.LocalRegionInfo == locatedOnly.LocalRegionInfo &&
+                    ReferenceEquals(reframed.LocalModelInfo, locatedOnly.LocalModelInfo),
+                    "clean frame is freshly body-validated and recropped without carrying stale hashes");
+                using (var server = new TestServer(new[] { models, validResponse }))
+                {
+                    var result = await PowerSiVision.CaptureAsync(null,
+                        new LocalVisionSettings { Enabled = true, Port = server.Port, ModelId = "large-test" }, CancellationToken.None,
+                        null, cleanFrame, reframed).ConfigureAwait(false);
+                    await server.Completion.ConfigureAwait(false);
+                    Check(result.Code == "OUTPUT_READ" && result.LocalVisionMode == "LOCATE_OCR" &&
+                        result.LocalOutputBody == reframed.LocalOutputBody && ReferenceEquals(result.LocalFrame, cleanFrame) &&
+                        result.LocalModelInfo.Id == locatedOnly.LocalModelInfo.Id && result.LocalLocateMs == locatedOnly.LocalLocateMs &&
+                        result.LocalElapsedMs >= locatedOnly.LocalElapsedMs && result.LocalSampleId.Length == 64 &&
+                        result.LocalOcrSampleId.Length == 64 && server.Requests.Count == 2,
+                        "reframed clean crop pins the located model and joins its metrics without another locator");
+                }
                 using (var server = new TestServer(new[] { models, TestResponse("50 50 950 300") }))
                 {
                     var result = await PowerSiVision.CaptureAsync(null, new LocalVisionSettings { Enabled = true, Port = server.Port },

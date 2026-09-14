@@ -50,8 +50,9 @@ namespace RemoteMonitorLink
         internal byte[] LocalPaneImage, LocalSuggestedImage;
         internal LocalVisionModel LocalModelInfo;
         internal string LocalSampleId, LocalOcrSampleId, LocalRegionInfo;
-        // Metadata only, never serialized: captured frame size and the B2 body-search counters for this run.
+        // Metadata only, never serialized: captured frame/body geometry and the B2 body-search counters for this run.
         internal System.Drawing.Size LocalFrameSize;
+        internal System.Drawing.Rectangle LocalOutputBody;
         internal string LocalBodyDiagnostics;
         internal string LocalVisionMode;
         internal int LocalRequestTimeoutSeconds;
@@ -760,6 +761,7 @@ namespace RemoteMonitorLink
             visionResult.LocalVisionMode = "OCR_ONLY";
             visionResult.LocalRequestTimeoutSeconds = 90;
             visionResult.LocalFrameSize = new System.Drawing.Size(1920, 1080);
+            visionResult.LocalOutputBody = new System.Drawing.Rectangle(317, 393, 585, 560);
             visionResult.LocalBodyDiagnostics = "B2|1920|1080|7|1|4|1|0|1|0";
             var visionWire = visionResult.Serialize(); var visionRoundTrip = Parse(visionWire);
             if (!visionWire.StartsWith("PS2:") || !visionRoundTrip.IsVision || visionRoundTrip.CapturedUtc != seenAt ||
@@ -768,6 +770,7 @@ namespace RemoteMonitorLink
                 visionRoundTrip.LocalModelInfo != null || visionRoundTrip.LocalSampleId != null || visionRoundTrip.LocalOcrSampleId != null ||
                 visionRoundTrip.LocalVisionMode != null || visionRoundTrip.LocalRequestTimeoutSeconds != 0 ||
                 visionRoundTrip.LocalBodyDiagnostics != null || !visionRoundTrip.LocalFrameSize.IsEmpty ||
+                !visionRoundTrip.LocalOutputBody.IsEmpty ||
                 visionWire.Contains("B2|") ||
                 visionWire.Contains("private") || visionRoundTrip.OutputFrequency != "38.000_MHZ")
                 throw new InvalidOperationException("Local vision source/time or data boundary failed.");

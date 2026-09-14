@@ -31,6 +31,8 @@ namespace RemoteMonitorSlave
     //   OutputAnchor AnchorOf(OutputBufferResult result)
     //       Reads that suffix back on the UI side (null when the worker learned nothing). The anchor is only a hint;
     //       phase 2 must confirm it with OutputPaneImage.FindBodyAt on the run's frame before storing it.
+    //   OutputAnchor AnchorFromVision(ProcessInventory, PowerSiObservation)
+    //       Builds a confirmed A2 anchor from a successful local-only LOCATE_ONLY result; no cursor sample or input.
     //   OutputBufferResult RunWorker(string[] args)
     //       Worker body, dispatched from OutputBufferCapture.TryRunWorker. Never throws for known failures; returns
     //       Code=AUTO_COPY_* / Method=NONE / Detail=<metadata or NONE>. Success: Code=AUTO_COPY_READ,
@@ -196,6 +198,37 @@ namespace RemoteMonitorSlave
             return OutputAnchor.TryParse(result.Detail.Substring(separator + 1), out anchor) ? anchor : null;
         }
 
+        internal static OutputAnchor AnchorFromVision(ProcessInventory inventory, PowerSiObservation located)
+        {
+            try
+            {
+                if (inventory == null || located == null) return null;
+                inventory.Validate();
+                if (inventory.Items.Length != 1 || inventory.Omitted != 0) return null;
+                var identity = inventory.Items[0];
+                if (!ProcessInventory.IsPowerSiName(identity.Name) || !identity.StartUtcTicks.HasValue ||
+                    identity.StartUtcTicks.Value < 1 || located.Code != "OUTPUT_UNAVAILABLE" || !located.IsVision ||
+                    located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || !located.CapturedUtc.HasValue ||
+                    located.LocalFrame == null || located.LocalFrame.Png == null || located.LocalImage == null ||
+                    located.LocalPaneImage == null || !ReferenceEquals(located.LocalFullImage, located.LocalFrame.Png) ||
+                    located.LocalFrameSize != located.LocalFrame.PixelSize || located.LocalFrameSize.IsEmpty ||
+                    located.LocalFrame.CapturedUtc != located.CapturedUtc.Value) return null;
+                var body = located.LocalOutputBody;
+                var size = located.LocalFrameSize;
+                if (body.X < 0 || body.Y < 0 || body.Width < 1 || body.Height < 1 ||
+                    body.Width > size.Width || body.Height > size.Height ||
+                    body.X > size.Width - body.Width || body.Y > size.Height - body.Height) return null;
+                var center = new Point(body.X + body.Width / 2, body.Y + body.Height / 2);
+                var anchor = new OutputAnchor { Pid = identity.Pid, StartUtcTicks = identity.StartUtcTicks.Value,
+                    SessionId = inventory.SessionId, ClientPoint = center, ClientSize = size,
+                    LearnedUtc = located.CapturedUtc.Value, Body = body };
+                OutputAnchor parsed;
+                return OutputAnchor.TryParse(anchor.Serialize(), out parsed) && parsed.Matches(anchor) && parsed.Body == body
+                    ? parsed : null;
+            }
+            catch { return null; }
+        }
+
         // Worker capture that travels in the optional 6th OB1 field; never a log or network payload.
         internal static void AttachFrame(OutputBufferResult result, byte[] png)
         {
@@ -348,7 +381,7 @@ namespace RemoteMonitorSlave
                 if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y)
                     throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
                 CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
-                ClickOnce(swapped);
+                ClickOnce(root, swapped);
                 var sinceClick = Stopwatch.StartNew();
                 Pause(SettleMilliseconds, cancellation);
                 WaitForeground(root, cancellation);
@@ -369,7 +402,7 @@ namespace RemoteMonitorSlave
                 Pause(Math.Max(0, System.Windows.Forms.SystemInformation.DoubleClickTime + 1 - (int)sinceClick.ElapsedMilliseconds), cancellation);
                 CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
                 if (RootOf(GetForegroundWindow()) != root) throw Failure("AUTO_COPY_FOREGROUND_FAILED", null);
-                ClickOnce(swapped);
+                ClickOnce(root, swapped);
                 Pause(SettleMilliseconds, cancellation);
             }
             finally
@@ -426,6 +459,7 @@ namespace RemoteMonitorSlave
 
         private static void CheckTarget(IntPtr root, ProcessInventory inventory, OutputAnchor anchor)
         {
+            PowerSiScreenCapture.RequireResponsive(root);
             uint pid;
             if (GetWindowThreadProcessId(root, out pid) == 0 || pid == 0 || (int)pid != anchor.Pid)
                 throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
@@ -536,8 +570,9 @@ namespace RemoteMonitorSlave
         }
 
         // Submit press/release together: no cancellable hold or inter-packet sleep can leave the button down.
-        private static void ClickOnce(bool swapped)
+        private static void ClickOnce(IntPtr root, bool swapped)
         {
+            PowerSiScreenCapture.RequireResponsive(root);
             var packets = ComposeClick(swapped);
             int inserted = -1;
             try
@@ -557,6 +592,7 @@ namespace RemoteMonitorSlave
         private static void Chord(IntPtr root, ushort key)
         {
             if (RootOf(GetForegroundWindow()) != root) throw Failure("AUTO_COPY_FOREGROUND_LOST", null);
+            PowerSiScreenCapture.RequireResponsive(root);
             var packets = ComposeChord(key);
             var returned = false;
             var inserted = 0;
@@ -638,6 +674,7 @@ namespace RemoteMonitorSlave
         internal static void SelfTest()
         {
             AnchorSelfTest();
+            VisionAnchorSelfTest();
             DetailSelfTest();
             LayoutSelfTest();
             PreflightSelfTest();
@@ -730,6 +767,53 @@ namespace RemoteMonitorSlave
                 Need(!OutputAnchor.TryParse(invalid, out rejected) && rejected == null, "malformed confirmed anchor rejected: " + invalid);
             }
             Need(Sanitize(confirmedText) == confirmedText, "confirmed anchor survives the OB1 detail character set");
+        }
+
+        private static void VisionAnchorSelfTest()
+        {
+            var captured = new DateTime(2026, 9, 14, 1, 2, 3, DateTimeKind.Utc);
+            var size = new Size(1920, 1009);
+            var body = new Rectangle(317, 393, 585, 560);
+            ProcessInventory Inventory(params ProcessState[] items)
+            {
+                return new ProcessInventory { SessionId = 2, Items = items };
+            }
+            PowerSiObservation Located(Rectangle outputBody, Size frameSize)
+            {
+                var png = new byte[] { 1, 2, 3 };
+                var result = PowerSiObservation.VisionLogExcerpt(null, captured);
+                result.LocalFrame = new PowerSiFrame { Png = png, PixelSize = size, CapturedUtc = captured };
+                result.LocalFullImage = png;
+                result.LocalImage = new byte[] { 4 };
+                result.LocalPaneImage = new byte[] { 5 };
+                result.LocalFrameSize = frameSize;
+                result.LocalOutputBody = outputBody;
+                result.LocalVisionMode = "LOCATE_ONLY";
+                return result;
+            }
+            var identity = new ProcessState { Pid = 4321, Name = "powersi", StartUtcTicks = 638000000000000000L };
+            var inventory = Inventory(identity);
+            var located = Located(body, size);
+            var anchor = AnchorFromVision(inventory, located);
+            Need(anchor != null && anchor.HasBody && anchor.Pid == identity.Pid &&
+                anchor.StartUtcTicks == identity.StartUtcTicks && anchor.SessionId == inventory.SessionId &&
+                anchor.ClientSize == size && anchor.Body == body && anchor.ClientPoint == new Point(609, 673) &&
+                anchor.LearnedUtc == captured && anchor.Serialize().StartsWith("A2|", StringComparison.Ordinal),
+                "locator result becomes a validated A2 centre anchor");
+
+            Need(AnchorFromVision(null, located) == null && AnchorFromVision(inventory, null) == null &&
+                AnchorFromVision(inventory, Located(Rectangle.Empty, size)) == null,
+                "missing locator anchor evidence rejected");
+            var failed = Located(body, size); failed.LocalFailure = "LOCATE_OUTPUT_INVALID";
+            Need(AnchorFromVision(inventory, failed) == null &&
+                AnchorFromVision(inventory, Located(new Rectangle(1800, 900, 200, 200), size)) == null &&
+                AnchorFromVision(inventory, Located(body, new Size(1919, 1009))) == null,
+                "failed, outside, and size-mismatched locator geometry rejected");
+            Need(AnchorFromVision(Inventory(
+                    identity, new ProcessState { Pid = 4322, Name = "pwrsi", StartUtcTicks = 638000000000000001L }), located) == null &&
+                AnchorFromVision(Inventory(new ProcessState { Pid = 4321, Name = "powersi" }), located) == null &&
+                AnchorFromVision(Inventory(new ProcessState { Pid = 4321, Name = "other", StartUtcTicks = identity.StartUtcTicks }), located) == null,
+                "non-singleton or incomplete PowerSI identity rejected");
         }
 
         private static void DetailSelfTest()
@@ -859,7 +943,7 @@ namespace RemoteMonitorSlave
                     NativePoint current;
                     if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y) return Skip;
                     if (RootOf(WindowFromPhysicalPoint(current)) != form.Handle) return Skip;
-                    ClickOnce(GetSystemMetrics(SwapButtonMetric) != 0);
+                    ClickOnce(form.Handle, GetSystemMetrics(SwapButtonMetric) != 0);
                     Pump(ForegroundWaitMilliseconds, () => false);
                     Need(GetForegroundWindow() == form.Handle, "live test window stayed foreground");
                     Chord(form.Handle, VirtualA);
@@ -885,7 +969,7 @@ namespace RemoteMonitorSlave
                         Pump(System.Windows.Forms.SystemInformation.DoubleClickTime + 1, () => false);
                         Need(GetForegroundWindow() == form.Handle && RootOf(WindowFromPhysicalPoint(target)) == form.Handle,
                             "live cleanup still targets the owned text box");
-                        ClickOnce(GetSystemMetrics(SwapButtonMetric) != 0);
+                        ClickOnce(form.Handle, GetSystemMetrics(SwapButtonMetric) != 0);
                         Need(Pump(SettleMilliseconds, () => box.SelectionLength == 0), "cleanup click removed selection");
                         Need(box.Text == Sample && System.Windows.Forms.Clipboard.GetText() == Sample,
                             "cleanup changed neither source text nor clipboard");

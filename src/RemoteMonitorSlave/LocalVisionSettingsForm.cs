@@ -67,7 +67,7 @@ namespace RemoteMonitorSlave
     internal sealed class LocalVisionSettingsForm : Form
     {
         private readonly CheckBox enabled = new CheckBox { Text = "PowerSI 화면의 로컬 LLM 판독 사용", AutoSize = true };
-        private readonly CheckBox autoCopy = new CheckBox { Text = "학습한 Output 위치로 자동 복사 (클릭·Ctrl+A/C 한 번)", AutoSize = true };
+        private readonly CheckBox autoCopy = new CheckBox { Text = "모든 PowerSI Output 자동 탐색·복사 (클릭·Ctrl+A/C)", AutoSize = true };
         private readonly NumericUpDown port = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 1234 };
         private readonly NumericUpDown timeout = new NumericUpDown { Minimum = 15, Maximum = 90, Value = 60 };
         private readonly ComboBox model = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown };
@@ -85,7 +85,7 @@ namespace RemoteMonitorSlave
                 Bounds = new Rectangle(18, 16, 604, 46) });
             enabled.SetBounds(18, 70, 500, 24); enabled.Checked = settings.Enabled;
             autoCopy.SetBounds(18, 100, 604, 24); autoCopy.Checked = settings.AutoCopyEnabled;
-            autoCopy.AccessibleName = "직독 실패 시 학습한 Output 위치를 다시 확인하고 한 번만 클릭·Ctrl+A·Ctrl+C 실행";
+            autoCopy.AccessibleName = "PowerSI 크기 변경 없이 전경 전환, Output 탐색·검증 후 자동 복사. 최초 수동 복사 없음";
             Controls.Add(new Label { Text = "LM Studio 포트", Bounds = new Rectangle(18, 138, 140, 24) });
             port.SetBounds(170, 134, 100, 28); port.Value = settings.Port;
             Controls.Add(new Label { Text = "단계별 제한 (초)", Bounds = new Rectangle(320, 138, 135, 24) });
@@ -99,7 +99,7 @@ namespace RemoteMonitorSlave
                 Bounds = new Rectangle(18, 318, 604, 42), AccessibleName = "thinking 비활성화 요청과 실제 적용 여부 구분" });
             message.SetBounds(18, 364, 604, 62);
             message.Text = "모델은 자동 다운로드/교체하지 않습니다. 선택한 모델이 없거나 이미지 입력을 지원하지 않으면 확인 불가로 표시합니다.\r\n" +
-                "자동 복사는 수동 복사 1회로 학습한 위치를 현재 화면에서 다시 확인한 뒤에만 실행하며 클립보드를 바꿉니다.";
+                "자동 복사는 창 크기를 바꾸지 않고 각 Output을 찾아 검증합니다. 응답 없는 창은 건너뛰며 클립보드는 바뀝니다.";
             var save = new Button { Text = "저장", Bounds = new Rectangle(404, 439, 100, 34) };
             var cancel = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(516, 439, 106, 34) };
             Controls.AddRange(new Control[] { enabled, autoCopy, port, timeout, model, discover, token, message, save, cancel });

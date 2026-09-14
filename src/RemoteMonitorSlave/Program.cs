@@ -104,7 +104,8 @@ namespace RemoteMonitorSlave
             string body = result.LocalBodyDiagnostics != null &&
                 System.Text.RegularExpressions.Regex.IsMatch(result.LocalBodyDiagnostics, @"\AB2(\|[0-9]{1,7}){9}\z")
                 ? result.LocalBodyDiagnostics : "UNKNOWN";
-            return " mode=" + (result.LocalVisionMode == "OCR_ONLY" ? "OCR_ONLY crop_reused=1" : "LOCATE_OCR crop_reused=0") +
+            return " mode=" + (result.LocalVisionMode == "OCR_ONLY" ? "OCR_ONLY crop_reused=1" :
+                result.LocalVisionMode == "LOCATE_ONLY" ? "LOCATE_ONLY crop_reused=0" : "LOCATE_OCR crop_reused=0") +
                 " request_timeout_s=" + Math.Max(0, Math.Min(90, result.LocalRequestTimeoutSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture) +
                 " transcript_policy=" + LocalVisionClient.TranscriptPolicy +
                 " thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=" + LocalVisionClient.ReadMaxTokens.ToString(System.Globalization.CultureInfo.InvariantCulture) +

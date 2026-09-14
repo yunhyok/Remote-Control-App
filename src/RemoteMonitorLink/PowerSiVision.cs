@@ -16,10 +16,12 @@ namespace RemoteMonitorLink
         internal const int RequestDeadlineMilliseconds = 105000;
 
         internal static async Task<PowerSiObservation> CaptureAsync(ProcessInventory inventory, LocalVisionSettings settings,
-            CancellationToken cancellation, IProgress<string> progress = null, PowerSiFrame savedFrame = null, PowerSiObservation savedCrop = null)
+            CancellationToken cancellation, IProgress<string> progress = null, PowerSiFrame savedFrame = null,
+            PowerSiObservation savedCrop = null, bool locateOnly = false)
         {
             cancellation.ThrowIfCancellationRequested();
-            if (savedCrop != null && (savedFrame == null || !ReferenceEquals(savedCrop.LocalFrame, savedFrame) || savedCrop.LocalImage == null))
+            if (savedCrop != null && (locateOnly || savedFrame == null || !ReferenceEquals(savedCrop.LocalFrame, savedFrame) ||
+                savedCrop.LocalImage == null))
                 throw new InvalidDataException("SAVED_CROP_INVALID");
             if (savedFrame == null) inventory.Validate();
             if (settings == null || !settings.Enabled) return PowerSiObservation.VisionUnavailable("VISION_NOT_CONFIGURED");
@@ -29,12 +31,14 @@ namespace RemoteMonitorLink
             PowerSiFrame frame = savedFrame;
             byte[] crop = null, pane = null, suggested = null;
             LocalVisionModel modelInfo = null;
+            bool joinedLocate = savedCrop != null && savedCrop.LocalVisionMode == "LOCATE_ONLY";
             var elapsed = Stopwatch.StartNew();
             var phaseClock = new Stopwatch();
-            long locateMs = 0, readMs = 0;
+            long priorElapsedMs = 0, locateMs = 0, readMs = 0;
             string regionInfo = null;
             string bodyDiagnostics = null;
             string captureInfo = null, model = null, stage = "CAPTURE";
+            Rectangle outputBody = Rectangle.Empty;
             PowerSiObservation Finish(PowerSiObservation result)
             {
                 result.LocalFrame = frame;
@@ -48,9 +52,10 @@ namespace RemoteMonitorLink
                 result.LocalRegionInfo = regionInfo;
                 result.LocalBodyDiagnostics = bodyDiagnostics;
                 result.LocalFrameSize = frame == null ? Size.Empty : frame.PixelSize;
-                result.LocalVisionMode = savedCrop == null ? "LOCATE_OCR" : "OCR_ONLY";
+                result.LocalOutputBody = outputBody;
+                result.LocalVisionMode = locateOnly ? "LOCATE_ONLY" : savedCrop == null || joinedLocate ? "LOCATE_OCR" : "OCR_ONLY";
                 result.LocalRequestTimeoutSeconds = settings.TimeoutSeconds;
-                result.LocalElapsedMs = elapsed.ElapsedMilliseconds;
+                result.LocalElapsedMs = priorElapsedMs + elapsed.ElapsedMilliseconds;
                 result.LocalLocateMs = stage == "LOCATE_OUTPUT" ? phaseClock.ElapsedMilliseconds : locateMs;
                 result.LocalReadMs = stage == "READ_CROP" ? phaseClock.ElapsedMilliseconds : readMs;
                 if (frame != null)
@@ -73,6 +78,17 @@ namespace RemoteMonitorLink
                         regionInfo = savedCrop.LocalRegionInfo;
                         bodyDiagnostics = savedCrop.LocalBodyDiagnostics;
                         captureInfo = savedCrop.LocalCaptureInfo;
+                        outputBody = savedCrop.LocalOutputBody;
+                        if (joinedLocate)
+                        {
+                            var locatedModel = savedCrop.LocalModelInfo?.Id ?? savedCrop.LocalModel;
+                            if (string.IsNullOrEmpty(locatedModel)) throw new InvalidDataException("SAVED_CROP_INVALID");
+                            settings.ModelId = locatedModel;
+                            modelInfo = savedCrop.LocalModelInfo;
+                            model = locatedModel;
+                            locateMs = savedCrop.LocalLocateMs;
+                            priorElapsedMs = savedCrop.LocalElapsedMs;
+                        }
                         stage = "REUSE_CROP";
                         progress?.Report(stage);
                     }
@@ -94,6 +110,7 @@ namespace RemoteMonitorLink
                         regionInfo = "P2|" + Box(region.Bounds);
                         BodySearchDiagnostics bodySearch;
                         var body = OutputPaneImage.FindBody(frame, region.Bounds, deadline.Token, out bodySearch);
+                        outputBody = body;
                         bodyDiagnostics = bodySearch.Summary();
                         pane = PowerSiScreenCapture.Crop(frame, body);
                         crop = OutputPaneImage.OcrInput(frame, body);
@@ -103,6 +120,11 @@ namespace RemoteMonitorLink
                         captureInfo = string.Format(System.Globalization.CultureInfo.InvariantCulture,
                             "원본 {0}×{1}px / LLM 제안 {2} / 본문 경계 {3}\r\nOCR: 본문 하단 {4}px ×{5} 확대 / 영역·숫자 정확도 미검증",
                             frame.PixelSize.Width, frame.PixelSize.Height, Box(region.Bounds), Box(body), ocrSize.Height, scale);
+                        if (locateOnly)
+                        {
+                            stage = "LOCATE_ONLY"; progress?.Report(stage);
+                            return Finish(PowerSiObservation.VisionLogExcerpt(null, frame.CapturedUtc));
+                        }
                     }
                     stage = "READ_CROP"; progress?.Report(stage);
                     phaseClock.Restart();
@@ -139,6 +161,50 @@ namespace RemoteMonitorLink
             }
             catch { return Finish(Failed("VISION_FAILED", stage + "_FAILED")); }
             finally { Reading.Release(); }
+        }
+
+        // Reuse the located body on the worker's clean pre-Ctrl+A frame. This performs the same fresh body
+        // validation again but never calls the model or operates the target application.
+        internal static PowerSiObservation ReframeOutput(PowerSiObservation located, PowerSiFrame cleanFrame)
+        {
+            if (located == null || cleanFrame == null || cleanFrame.Png == null || located.Code != "OUTPUT_UNAVAILABLE" ||
+                located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || !located.CapturedUtc.HasValue ||
+                located.LocalFrame == null || located.LocalFrameSize.IsEmpty || located.LocalOutputBody.IsEmpty ||
+                located.LocalFullImage == null || located.LocalImage == null || located.LocalPaneImage == null ||
+                !ReferenceEquals(located.LocalFullImage, located.LocalFrame.Png) ||
+                located.LocalFrame.PixelSize != located.LocalFrameSize || cleanFrame.PixelSize != located.LocalFrameSize ||
+                located.LocalFrame.CapturedUtc != located.CapturedUtc.Value || cleanFrame.CapturedUtc.Kind != DateTimeKind.Utc ||
+                cleanFrame.CapturedUtc.Year < 2000)
+                throw new InvalidDataException("SAVED_CROP_INVALID");
+
+            var stored = located.LocalOutputBody;
+            if (stored.X < 0 || stored.Y < 0 || stored.Width < 1 || stored.Height < 1 ||
+                stored.Width > cleanFrame.PixelSize.Width || stored.Height > cleanFrame.PixelSize.Height ||
+                stored.X > cleanFrame.PixelSize.Width - stored.Width || stored.Y > cleanFrame.PixelSize.Height - stored.Height)
+                throw new InvalidDataException("SAVED_CROP_INVALID");
+            var center = new Point(stored.X + stored.Width / 2, stored.Y + stored.Height / 2);
+            BodySearchDiagnostics bodySearch;
+            var body = OutputPaneImage.FindBodyAt(cleanFrame, center, CancellationToken.None, out bodySearch);
+            if (body != stored) throw new InvalidDataException("SAVED_CROP_INVALID");
+
+            var result = PowerSiObservation.VisionLogExcerpt(null, cleanFrame.CapturedUtc);
+            result.LocalFrame = cleanFrame;
+            result.LocalFullImage = cleanFrame.Png;
+            result.LocalImage = OutputPaneImage.OcrInput(cleanFrame, body);
+            result.LocalPaneImage = PowerSiScreenCapture.Crop(cleanFrame, body);
+            result.LocalSuggestedImage = null; // The separately retained locator run owns its pre-copy suggestion image.
+            result.LocalCaptureInfo = located.LocalCaptureInfo;
+            result.LocalModelInfo = located.LocalModelInfo;
+            result.LocalModel = located.LocalModel;
+            result.LocalRegionInfo = located.LocalRegionInfo;
+            result.LocalFrameSize = cleanFrame.PixelSize;
+            result.LocalOutputBody = body;
+            result.LocalBodyDiagnostics = bodySearch.Summary();
+            result.LocalVisionMode = "LOCATE_ONLY";
+            result.LocalRequestTimeoutSeconds = located.LocalRequestTimeoutSeconds;
+            result.LocalElapsedMs = located.LocalElapsedMs;
+            result.LocalLocateMs = located.LocalLocateMs;
+            return result;
         }
 
         private static string Box(Rectangle rect)

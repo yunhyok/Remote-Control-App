@@ -24,35 +24,65 @@ namespace RemoteMonitorLink
     internal static class PowerSiScreenCapture
     {
         private const string WorkerArgument = "--powersi-screen";
+        private const string PrepareWorkerArgument = "--powersi-screen-prepare";
+        private const string PrepareGate = "GO";
+        private const uint WmNull = 0;
+        private const uint SmtoBlock = 0x0001;
+        private const uint SmtoAbortIfHung = 0x0002;
+        private const uint SmtoErrorOnExit = 0x0020;
+        private const uint ResponsivenessMilliseconds = 750;
         private const int MaxPngBytes = 8 * 1024 * 1024;
         private const int MaxWireChars = ((MaxPngBytes + 2) / 3) * 4 + 64;
         private static readonly string[] Errors = { "SC_IDENTITY", "SC_NOT_RUNNING", "SC_WINDOW_UNAVAILABLE",
             "SC_AMBIGUOUS_WINDOW", "SC_MINIMIZED", "SC_DESKTOP_UNAVAILABLE", "SC_CAPTURE_FAILED", "SC_BLANK",
-            "SC_SIZE", "SC_WINDOW_CHANGED", "SC_TIMEOUT", "SC_WORKER_FAILED", "SC_INVALID_IMAGE" };
+            "SC_SIZE", "SC_WINDOW_CHANGED", "SC_PENDING", "SC_FOREGROUND_FAILED", "SC_TIMEOUT", "SC_WORKER_FAILED",
+            "SC_INVALID_IMAGE" };
 
         internal static async Task<PowerSiFrame> CaptureAsync(ProcessInventory inventory, CancellationToken cancellation)
+        {
+            return await RunWorker(WorkerArgument, WorkerArguments(inventory, false, cancellation), cancellation).ConfigureAwait(false);
+        }
+
+        internal static async Task<PowerSiFrame> PrepareAsync(ProcessInventory singleton, CancellationToken cancellation)
+        {
+            return await RunWorker(PrepareWorkerArgument, WorkerArguments(singleton, true, cancellation), cancellation).ConfigureAwait(false);
+        }
+
+        private static string WorkerArguments(ProcessInventory inventory, bool requireSingleton, CancellationToken cancellation)
         {
             cancellation.ThrowIfCancellationRequested();
             if (inventory == null) throw Failure("SC_IDENTITY");
             inventory.Validate();
             if (inventory.Items.Length == 0) throw Failure("SC_NOT_RUNNING");
+            if (requireSingleton && inventory.Items.Length != 1) throw Failure("SC_IDENTITY");
             if (inventory.Omitted != 0 || inventory.Items.Any(p => !ProcessInventory.IsPowerSiName(p.Name) ||
                 !p.StartUtcTicks.HasValue || p.StartUtcTicks.Value <= 0)) throw Failure("SC_IDENTITY");
             var identities = string.Join(",", inventory.Items.Select(p => p.Pid.ToString(CultureInfo.InvariantCulture) + ":" +
                 p.StartUtcTicks.Value.ToString(CultureInfo.InvariantCulture)));
-            return await RunWorker(inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities, cancellation).ConfigureAwait(false);
+            return inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities;
         }
 
-        private static async Task<PowerSiFrame> RunWorker(string arguments, CancellationToken cancellation)
+        private static async Task<PowerSiFrame> RunWorker(string workerArgument, string arguments, CancellationToken cancellation)
         {
             using (var worker = new Process { StartInfo = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location,
-                WorkerArgument + " " + arguments) { UseShellExecute = false, CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true } })
+                workerArgument + " " + arguments) { UseShellExecute = false, CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true,
+                    RedirectStandardInput = workerArgument == PrepareWorkerArgument } })
             {
                 try
                 {
                     cancellation.ThrowIfCancellationRequested();
                     worker.Start();
+                    if (workerArgument == PrepareWorkerArgument)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        // A foreground-capable parent may grant only this short-lived child. The child still verifies
+                        // the actual foreground result; a refused grant never triggers a stronger activation method.
+                        AllowSetForegroundWindow((uint)worker.Id);
+                        cancellation.ThrowIfCancellationRequested();
+                        worker.StandardInput.WriteLine(PrepareGate);
+                        worker.StandardInput.Close();
+                    }
                     var reading = ReadBounded(worker.StandardOutput);
                     var clock = Stopwatch.StartNew();
                     while (!worker.HasExited || !reading.IsCompleted)
@@ -91,10 +121,12 @@ namespace RemoteMonitorLink
 
         internal static bool TryRunWorker(string[] args)
         {
-            if (args.Length == 0 || args[0] != WorkerArgument) return false;
+            if (args.Length == 0 || (args[0] != WorkerArgument && args[0] != PrepareWorkerArgument)) return false;
             try
             {
-                var frame = ReadWorker(args);
+                if (args[0] == PrepareWorkerArgument &&
+                    (!Console.IsInputRedirected || Console.In.ReadLine() != PrepareGate)) throw Failure("SC_FOREGROUND_FAILED");
+                var frame = args[0] == PrepareWorkerArgument ? ReadPrepareWorker(args) : ReadWorker(args);
                 Console.Out.Write("SC1|" + frame.CapturedUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" + Convert.ToBase64String(frame.Png));
             }
             catch (InvalidDataException error) when (Errors.Contains(error.Message)) { Console.Out.Write(error.Message); }
@@ -108,6 +140,57 @@ namespace RemoteMonitorLink
             var frame = CaptureWindow(window);
             if (ResolveWindow(args) != window) throw Failure("SC_WINDOW_CHANGED");
             return frame;
+        }
+
+        private static PowerSiFrame ReadPrepareWorker(string[] args)
+        {
+            var window = ResolveWindow(args);
+            Rect windowRect, clientRect;
+            ReadGeometry(window, out windowRect, out clientRect);
+            RequireResponsive(window); // Windows message responsiveness only; application-internal phases may remain busy.
+            CheckUnchanged(args, window, windowRect, clientRect);
+            SetExactForeground(window);
+            CheckUnchanged(args, window, windowRect, clientRect);
+            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+            var frame = CaptureWindow(window);
+            CheckUnchanged(args, window, windowRect, clientRect);
+            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+            return frame;
+        }
+
+        private static void ReadGeometry(IntPtr window, out Rect windowRect, out Rect clientRect)
+        {
+            if (!GetWindowRect(window, out windowRect) || !GetClientRect(window, out clientRect))
+                throw Failure("SC_WINDOW_UNAVAILABLE");
+        }
+
+        private static void CheckUnchanged(string[] args, IntPtr window, Rect windowRect, Rect clientRect)
+        {
+            Rect currentWindow, currentClient;
+            if (ResolveWindow(args) != window || !GetWindowRect(window, out currentWindow) ||
+                !GetClientRect(window, out currentClient) || !SameRect(windowRect, currentWindow) ||
+                !SameRect(clientRect, currentClient)) throw Failure("SC_WINDOW_CHANGED");
+        }
+
+        private static bool SameRect(Rect left, Rect right)
+        {
+            return left.Left == right.Left && left.Top == right.Top && left.Right == right.Right && left.Bottom == right.Bottom;
+        }
+
+        private static void SetExactForeground(IntPtr window)
+        {
+            if (!SetForegroundWindow(window)) throw Failure("SC_FOREGROUND_FAILED");
+            if (GetForegroundWindow() != window) throw Failure("SC_FOREGROUND_FAILED");
+        }
+
+        // Passive Windows message-pump probe only; it cannot identify every application-internal pending phase.
+        internal static void RequireResponsive(IntPtr root)
+        {
+            UIntPtr ignored;
+            if (root == IntPtr.Zero || IsHungAppWindow(root) ||
+                SendMessageTimeout(root, WmNull, UIntPtr.Zero, IntPtr.Zero,
+                    SmtoBlock | SmtoAbortIfHung | SmtoErrorOnExit, ResponsivenessMilliseconds, out ignored) == IntPtr.Zero)
+                throw Failure("SC_PENDING");
         }
 
         // Shared target identity, independent of screenshot or text collection. Single window is the current field-test scope.
@@ -136,21 +219,15 @@ namespace RemoteMonitorLink
             using (var self = Process.GetCurrentProcess()) if (self.SessionId != session) throw Failure("SC_IDENTITY");
             foreach (var identity in identities)
             {
-                using (var process = Process.GetProcessById(identity.Key))
-                    if (process.HasExited || process.SessionId != session ||
-                        !ProcessInventory.IsPowerSiName(ProcessInventory.NormalizeName(process.ProcessName)) ||
-                        process.StartTime.ToUniversalTime().Ticks != identity.Value) throw Failure("SC_IDENTITY");
-            }
-            // Also reject a new PowerSI instance that was absent from the inventory snapshot.
-            foreach (var name in new[] { "powersi", "pwrsi" })
-            {
-                var processes = Process.GetProcessesByName(name);
                 try
                 {
-                    foreach (var process in processes)
-                        if (process.SessionId == session && !identities.ContainsKey(process.Id)) throw Failure("SC_IDENTITY");
+                    using (var process = Process.GetProcessById(identity.Key))
+                        if (process.HasExited || process.SessionId != session ||
+                            !ProcessInventory.IsPowerSiName(ProcessInventory.NormalizeName(process.ProcessName)) ||
+                            process.StartTime.ToUniversalTime().Ticks != identity.Value) throw Failure("SC_IDENTITY");
                 }
-                finally { foreach (var process in processes) process.Dispose(); }
+                catch (InvalidDataException) { throw; }
+                catch { throw Failure("SC_IDENTITY"); }
             }
         }
 
@@ -160,15 +237,27 @@ namespace RemoteMonitorLink
             var enumerated = EnumWindows((window, ignored) =>
             {
                 uint pid; GetWindowThreadProcessId(window, out pid);
-                if (identities.ContainsKey((int)pid) && IsWindowVisible(window)) windows.Add(window);
-                return windows.Count < 2;
+                return TrackVisibleWindow(identities, windows, window, pid, IsWindowVisible(window));
             }, IntPtr.Zero);
+            var selected = RequireSingleWindow(windows, enumerated);
+            if (IsIconic(selected)) throw Failure("SC_MINIMIZED");
+            int cloaked;
+            if (DwmGetWindowAttribute(selected, 14, out cloaked, 4) == 0 && cloaked != 0)
+                throw Failure("SC_WINDOW_UNAVAILABLE");
+            return selected;
+        }
+
+        private static bool TrackVisibleWindow(Dictionary<int, long> identities, List<IntPtr> windows,
+            IntPtr window, uint pid, bool visible)
+        {
+            if (pid <= int.MaxValue && identities.ContainsKey((int)pid) && visible) windows.Add(window);
+            return windows.Count < 2;
+        }
+
+        private static IntPtr RequireSingleWindow(List<IntPtr> windows, bool enumerated)
+        {
             if (windows.Count > 1) throw Failure("SC_AMBIGUOUS_WINDOW");
             if (!enumerated || windows.Count == 0) throw Failure("SC_WINDOW_UNAVAILABLE");
-            if (IsIconic(windows[0])) throw Failure("SC_MINIMIZED");
-            int cloaked;
-            if (DwmGetWindowAttribute(windows[0], 14, out cloaked, 4) == 0 && cloaked != 0)
-                throw Failure("SC_WINDOW_UNAVAILABLE");
             return windows[0];
         }
 
@@ -310,7 +399,29 @@ namespace RemoteMonitorLink
             Reject(() => CheckSize(0, 50), "SC_SIZE");
             Reject(() => Parse("SC1|1|AAAA"), "SC_INVALID_IMAGE");
             Reject(() => Parse("SC_TIMEOUT"), "SC_TIMEOUT");
+            Reject(() => Parse("SC_PENDING"), "SC_PENDING");
+            Reject(() => Parse("SC_FOREGROUND_FAILED"), "SC_FOREGROUND_FAILED");
             Reject(() => Parse(new string('X', MaxWireChars + 1)), "SC_INVALID_IMAGE");
+
+            var singleton = new ProcessInventory { SessionId = 7, Items = new[] {
+                new ProcessState { Pid = 41, Name = "powersi", StartUtcTicks = 123 } } };
+            if (WorkerArguments(singleton, true, CancellationToken.None) != "7 41:123")
+                throw new InvalidOperationException("Explicit PowerSI singleton identity changed.");
+            Reject(() => WorkerArguments(new ProcessInventory { SessionId = 7, Items = new[] {
+                new ProcessState { Pid = 41, Name = "powersi", StartUtcTicks = 123 },
+                new ProcessState { Pid = 42, Name = "pwrsi", StartUtcTicks = 456 } } }, true,
+                CancellationToken.None), "SC_IDENTITY");
+
+            var identities = new Dictionary<int, long> { { 41, 123 } };
+            var windows = new List<IntPtr>();
+            if (!TrackVisibleWindow(identities, windows, new IntPtr(420), 42, true) || windows.Count != 0 ||
+                !TrackVisibleWindow(identities, windows, new IntPtr(410), 41, true) ||
+                RequireSingleWindow(windows, true) != new IntPtr(410) ||
+                TrackVisibleWindow(identities, windows, new IntPtr(411), 41, true))
+                throw new InvalidOperationException("Explicit PowerSI window selection changed.");
+            Reject(() => RequireSingleWindow(windows, false), "SC_AMBIGUOUS_WINDOW");
+            ResponsivenessSelfTest();
+
             using (var bitmap = new Bitmap(32, 24, PixelFormat.Format24bppRgb))
             {
                 using (var graphics = Graphics.FromImage(bitmap)) graphics.Clear(Color.White);
@@ -345,6 +456,91 @@ namespace RemoteMonitorLink
             }
         }
 
+        private static void ResponsivenessSelfTest()
+        {
+            const uint popupVisible = 0x80000000u | 0x10000000u;
+            const uint toolWindow = 0x00000080;
+            var first = CreateWindowEx(toolWindow, "Static", "Owned capture self-test 1", popupVisible,
+                -32000, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            var second = CreateWindowEx(toolWindow, "Static", "Owned capture self-test 2", popupVisible,
+                -31600, -32000, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            if (first == IntPtr.Zero || second == IntPtr.Zero)
+            {
+                if (first != IntPtr.Zero) DestroyWindow(first);
+                if (second != IntPtr.Zero) DestroyWindow(second);
+                throw new InvalidOperationException("Owned capture windows were not created.");
+            }
+            try
+            {
+                var before = GetForegroundWindow();
+                RequireResponsive(first);
+                if (GetForegroundWindow() != before)
+                    throw new InvalidOperationException("Responsiveness probe changed the foreground window.");
+
+                // Exercise the real foreground call when this self-test process has foreground rights.
+                if (SetForegroundWindow(first) && GetForegroundWindow() == first)
+                {
+                    Rect windowRect, clientRect, currentWindow, currentClient;
+                    ReadGeometry(second, out windowRect, out clientRect);
+                    SetExactForeground(second);
+                    if (GetForegroundWindow() != second || !GetWindowRect(second, out currentWindow) ||
+                        !GetClientRect(second, out currentClient) || !SameRect(windowRect, currentWindow) ||
+                        !SameRect(clientRect, currentClient))
+                        throw new InvalidOperationException("Owned foreground switch changed target geometry.");
+                }
+            }
+            finally
+            {
+                DestroyWindow(second);
+                DestroyWindow(first);
+            }
+
+            IntPtr blocked = IntPtr.Zero;
+            Exception blockedError = null;
+            using (var ready = new ManualResetEvent(false))
+            using (var release = new ManualResetEvent(false))
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        blocked = CreateWindowEx(0x08000080, "Static", "Owned pending self-test", popupVisible,
+                            -32000, -31600, 320, 200, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                    }
+                    catch (Exception error) { blockedError = error; }
+                    finally { ready.Set(); }
+                    if (blocked != IntPtr.Zero)
+                    {
+                        release.WaitOne(5000);
+                        DestroyWindow(blocked);
+                    }
+                });
+                thread.IsBackground = true;
+                thread.Start();
+                if (!ready.WaitOne(2000) || blocked == IntPtr.Zero || blockedError != null)
+                {
+                    release.Set(); thread.Join(2000);
+                    throw new InvalidOperationException("Owned pending window was not created.", blockedError);
+                }
+                try
+                {
+                    var foreground = GetForegroundWindow();
+                    var clock = Stopwatch.StartNew();
+                    try { RequireResponsive(blocked); throw new InvalidOperationException("Pending window was accepted."); }
+                    catch (InvalidDataException error) when (error.Message == "SC_PENDING") { }
+                    if (clock.ElapsedMilliseconds > 2000)
+                        throw new InvalidOperationException("Pending window check exceeded its bound.");
+                    if (GetForegroundWindow() != foreground)
+                        throw new InvalidOperationException("Pending window check changed the foreground window.");
+                }
+                finally
+                {
+                    release.Set();
+                    if (!thread.Join(2000)) throw new InvalidOperationException("Owned pending window did not close.");
+                }
+            }
+        }
+
         private static InvalidDataException Failure(string code) { return new InvalidDataException(code); }
         [StructLayout(LayoutKind.Sequential)] private struct Rect { internal int Left, Top, Right, Bottom; }
         private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
@@ -352,8 +548,20 @@ namespace RemoteMonitorLink
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
         [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] private static extern bool IsHungAppWindow(IntPtr window);
         [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr window, out Rect rect);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out Rect rect);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint processId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+        private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam,
+            uint flags, uint timeout, out UIntPtr result);
         [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateWindowExW")]
+        private static extern IntPtr CreateWindowEx(uint exStyle, string className, string title, uint style,
+            int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+        [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr window);
         [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out int value, int size);
         [DllImport("user32.dll")] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
         [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr desktop);
