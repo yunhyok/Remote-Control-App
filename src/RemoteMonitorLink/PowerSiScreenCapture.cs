@@ -250,7 +250,7 @@ namespace RemoteMonitorLink
             finally { bitmap.UnlockBits(bits); }
         }
 
-        private static PowerSiFrame Parse(string wire)
+        internal static PowerSiFrame Parse(string wire)
         {
             if (Errors.Contains(wire)) throw Failure(wire);
             if (wire == null || wire.Length > MaxWireChars) throw Failure("SC_INVALID_IMAGE");

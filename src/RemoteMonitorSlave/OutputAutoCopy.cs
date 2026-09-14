@@ -40,19 +40,19 @@ namespace RemoteMonitorSlave
     //       UI-side helper. Spawns the worker process (8 s budget) so a hang cannot freeze the UI, and parses OB1.
     //       The anchor MUST carry a confirmed Body (A2); an A1 anchor is refused with AUTO_COPY_REQUEST_INVALID.
     //   byte[] FrameOf(OutputBufferResult result)
-    //       The pre-input worker capture, present only on a failure result (null otherwise). It travels
+    //       The latest worker capture on failure, or the cleared pre-Ctrl+A capture on success. It travels
     //       in the optional 6th OB1 field; OutputBufferCapture.Serialize/Parse use AttachFrame/FrameOf for it.
     //   void SelfTest()                         Called from OutputBufferCapture.SelfTest(); Program.cs needs no change.
     //
-    // Worker order (v0.1.51): fresh capture/body validation BEFORE any input, then resolve/recheck identity,
-    //   geometry, hit test and idle input -> paired click -> guarded Ctrl+A -> fresh clipboard baseline -> Ctrl+C.
+    // Worker order: fresh capture/body validation BEFORE any input, then resolve/recheck identity,
+    //   geometry, hit test and idle input -> click -> clean capture -> Ctrl+A/C -> guarded deselection click.
     //   Highlighted/ambiguous bodies fail closed; we never click an old rectangle to make validation pass.
     //   Closing the parent's stdin pipe requests cancellation; the host grants cleanup time before termination.
     //
     // Behaviour notes for phase 2:
     //   * The clipboard is NOT restored after an auto copy (the copied Output text is the result we hand to the caller).
     //   * The cursor position is saved before the click and restored best effort at the end of the worker, success or not.
-    //   * Exactly one click, one Ctrl+A and one Ctrl+C are injected; every key is released in a finally block.
+    //   * Two clicks and one Ctrl+A/C; cancellation or input interference skips further input, including cleanup.
     //   * Every stored coordinate is re-verified live (window identity, client size, body search, hit test, foreground).
     //   * The live part of SelfTest() replaces the current clipboard content with its own sample text and does not save
     //     or restore the previous content; it is skipped when no interactive foreground window can be obtained.
@@ -196,7 +196,7 @@ namespace RemoteMonitorSlave
             return OutputAnchor.TryParse(result.Detail.Substring(separator + 1), out anchor) ? anchor : null;
         }
 
-        // Worker capture that travels in the optional 6th OB1 field. Only failure results carry one.
+        // Worker capture that travels in the optional 6th OB1 field; never a log or network payload.
         internal static void AttachFrame(OutputBufferResult result, byte[] png)
         {
             if (result == null || png == null || png.Length == 0) return;
@@ -207,6 +207,17 @@ namespace RemoteMonitorSlave
         {
             byte[] png;
             return result != null && Frames.TryGetValue(result, out png) ? png : null;
+        }
+
+        internal static PowerSiFrame CleanFrameOf(OutputBufferResult result)
+        {
+            if (result?.Code != "AUTO_COPY_READ" || result.Method != "AUTO_CLIPBOARD" || result.Text == null)
+                throw new InvalidDataException("AUTO_COPY_FRAME_INVALID");
+            var png = FrameOf(result);
+            var parts = (result.Detail ?? "").Split('|');
+            if (png == null || parts.Length < 2 || parts[parts.Length - 2] != "CLEAN_FRAME")
+                throw new InvalidDataException("AUTO_COPY_FRAME_INVALID");
+            return PowerSiScreenCapture.Parse("SC1|" + parts[parts.Length - 1] + "|" + Convert.ToBase64String(png));
         }
 
         // ---------------------------------------------------------------- UI side
@@ -266,7 +277,7 @@ namespace RemoteMonitorSlave
                     throw Failure("AUTO_COPY_REQUEST_INVALID", null);
                 WatchParent(cancellation);
                 var result = Run(args, anchor, cancellation.Token);
-                capturedFrame = null; // A successful copy returns the Output text, not a screenshot.
+                capturedFrame = null; // Success already attached its clean frame to the result.
                 return result;
             }
             catch (AutoCopyException error) { return Failed(error.Message, error.Detail); }
@@ -328,6 +339,7 @@ namespace RemoteMonitorSlave
             NativePoint saved;
             var savedCursor = GetPhysicalCursorPos(out saved);
             OutputBufferResult copied;
+            PowerSiFrame cleanFrame;
             try
             {
                 cancellation.ThrowIfCancellationRequested();
@@ -337,8 +349,14 @@ namespace RemoteMonitorSlave
                     throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
                 CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
                 ClickOnce(swapped);
+                var sinceClick = Stopwatch.StartNew();
                 Pause(SettleMilliseconds, cancellation);
                 WaitForeground(root, cancellation);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                // OCR must see the deselected state, not the selection we are about to create for copying.
+                cleanFrame = CaptureFrame(root);
+                capturedFrame = cleanFrame.Png;
+                ConfirmBody(cleanFrame, anchor, clickClient, cancellation, out summary);
                 CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
                 Chord(root, VirtualA);
                 Pause(ChordGapMilliseconds, cancellation);
@@ -347,6 +365,12 @@ namespace RemoteMonitorSlave
                 uint baseline = OutputBufferCapture.ClipboardSequence;
                 Chord(root, VirtualC);
                 copied = ReadCopiedText(inventory, baseline, cancellation);
+                // Keep this a single click rather than the second half of a double-click (which selects a word).
+                Pause(Math.Max(0, System.Windows.Forms.SystemInformation.DoubleClickTime + 1 - (int)sinceClick.ElapsedMilliseconds), cancellation);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                if (RootOf(GetForegroundWindow()) != root) throw Failure("AUTO_COPY_FOREGROUND_FAILED", null);
+                ClickOnce(swapped);
+                Pause(SettleMilliseconds, cancellation);
             }
             finally
             {
@@ -360,7 +384,9 @@ namespace RemoteMonitorSlave
             copied.Code = "AUTO_COPY_READ";
             copied.Method = "AUTO_CLIPBOARD";
             copied.Detail = Sanitize(string.Join("|", "A2", Text(anchor.ClientPoint.X), Text(anchor.ClientPoint.Y),
-                Text(body.X), Text(body.Y), Text(body.Width), Text(body.Height), Text(target.X), Text(target.Y), summary));
+                Text(body.X), Text(body.Y), Text(body.Width), Text(body.Height), Text(target.X), Text(target.Y), summary,
+                "CLEAN_FRAME", cleanFrame.CapturedUtc.Ticks.ToString(CultureInfo.InvariantCulture)));
+            AttachFrame(copied, cleanFrame.Png);
             return copied;
         }
 
@@ -854,9 +880,28 @@ namespace RemoteMonitorSlave
                         return copied != null;
                     });
                     Need(copied == Sample, "live Ctrl+A/Ctrl+C copied the exact control text");
+                    for (int repeat = 0; repeat < 2; repeat++)
+                    {
+                        Pump(System.Windows.Forms.SystemInformation.DoubleClickTime + 1, () => false);
+                        Need(GetForegroundWindow() == form.Handle && RootOf(WindowFromPhysicalPoint(target)) == form.Handle,
+                            "live cleanup still targets the owned text box");
+                        ClickOnce(GetSystemMetrics(SwapButtonMetric) != 0);
+                        Need(Pump(SettleMilliseconds, () => box.SelectionLength == 0), "cleanup click removed selection");
+                        Need(box.Text == Sample && System.Windows.Forms.Clipboard.GetText() == Sample,
+                            "cleanup changed neither source text nor clipboard");
+                        if (repeat == 0)
+                        {
+                            baseline = OutputBufferCapture.ClipboardSequence;
+                            Chord(form.Handle, VirtualA);
+                            Pump(ChordGapMilliseconds, () => false);
+                            Chord(form.Handle, VirtualC);
+                            Need(Pump(ClipboardWaitMilliseconds, () => OutputBufferCapture.ClipboardSequence != baseline) &&
+                                System.Windows.Forms.Clipboard.GetText() == Sample, "second copy after cleanup remains exact");
+                        }
+                    }
                 }
                 finally { if (savedCursor) { try { SetPhysicalCursorPos(saved.X, saved.Y); } catch { } } }
-                return "PASS: live input test (click + Ctrl+A + Ctrl+C)";
+                return "PASS: live input test (click + Ctrl+A + Ctrl+C + deselect; repeated copy exact)";
             }
             finally
             {

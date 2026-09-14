@@ -17,7 +17,7 @@ namespace RemoteMonitorSlave
     internal static class OutputBufferCapture
     {
         internal const int MaxCharacters = PowerSiOutputBuffer.MaxCharacters;
-        private const int MaxWire = (MaxCharacters * 2 + 2) / 3 * 4 + 4096;
+        private const int MaxWire = (MaxCharacters * 2 + 2) / 3 * 4 + (OutputAutoCopy.MaxFramePng + 2) / 3 * 4 + 4096;
         private const string Argument = "--powersi-output-buffer";
         private const string CopyArgument = "--powersi-output-copy";
         private static readonly Encoding Encoding = new UnicodeEncoding(false, false, true);
@@ -174,7 +174,7 @@ namespace RemoteMonitorSlave
             Validate(result);
             var wire = string.Join("\t", "OB1", result.Code, result.Method, result.Detail,
                 result.Text == null ? "-" : Convert.ToBase64String(Encoding.GetBytes(result.Text)));
-            // Optional 6th field: only the auto-copy verb fills it, and only when it failed after its own capture.
+            // Optional 6th field: auto-copy clean pre-Ctrl+A frame on success, latest diagnostic frame on failure.
             var frame = OutputAutoCopy.FrameOf(result);
             if (frame == null) return wire;
             if (frame.Length > OutputAutoCopy.MaxFramePng) throw new InvalidDataException("BUFFER_RESULT_INVALID");
@@ -317,6 +317,28 @@ namespace RemoteMonitorSlave
             if (returned.Code != "AUTO_COPY_BODY_MOVED" || returned.Text != null || carried == null ||
                 !carried.SequenceEqual(framePng) || LogMetadata(returned).Contains("iVBOR"))
                 throw new InvalidOperationException("Auto copy frame lost or leaked on the OB1 wire.");
+            // Successful automatic OCR uses this exact pre-selection frame and its actual capture timestamp.
+            using (var bitmap = new System.Drawing.Bitmap(600, 420))
+            using (var png = new MemoryStream())
+            {
+                bitmap.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                var capturedUtc = new DateTime(2026, 9, 14, 2, 3, 4, DateTimeKind.Utc);
+                var clean = new OutputBufferResult { Code = "AUTO_COPY_READ", Method = "AUTO_CLIPBOARD",
+                    Detail = automatic.Detail + "|CLEAN_FRAME|" + capturedUtc.Ticks.ToString(CultureInfo.InvariantCulture), Text = "sentinel" };
+                OutputAutoCopy.AttachFrame(clean, png.ToArray());
+                var decoded = Parse(Serialize(clean));
+                var cleanFrame = OutputAutoCopy.CleanFrameOf(decoded);
+                if (decoded.Text != clean.Text || cleanFrame.CapturedUtc != capturedUtc || cleanFrame.PixelSize != bitmap.Size ||
+                    !cleanFrame.Png.SequenceEqual(png.ToArray()) || LogMetadata(decoded).Contains("iVBOR"))
+                    throw new InvalidOperationException("Clean automatic frame or timestamp changed during transport.");
+                foreach (var invalid in new[] { automatic, returned, new OutputBufferResult { Code = "AUTO_COPY_READ",
+                    Method = "AUTO_CLIPBOARD", Text = "sentinel", Detail = "CLEAN_FRAME|0" } })
+                {
+                    OutputAutoCopy.AttachFrame(invalid, png.ToArray());
+                    try { OutputAutoCopy.CleanFrameOf(invalid); throw new InvalidOperationException("Invalid clean capture accepted."); }
+                    catch (InvalidDataException) { }
+                }
+            }
             foreach (var broken in new[] { "not base64", "AAAA", Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }) })
             {
                 var rejected = false;
@@ -325,11 +347,35 @@ namespace RemoteMonitorSlave
                 catch (FormatException) { rejected = true; }
                 if (!rejected) throw new InvalidOperationException("A non-PNG 6th OB1 field was accepted.");
             }
+            // Maximum text plus a real PNG larger than the old 4KiB spare envelope must survive both readers.
+            using (var bitmap = new System.Drawing.Bitmap(100, 100))
+            using (var png = new MemoryStream())
+            {
+                var random = new Random(53);
+                for (int y = 0; y < bitmap.Height; y++)
+                    for (int x = 0; x < bitmap.Width; x++)
+                        bitmap.SetPixel(x, y, System.Drawing.Color.FromArgb(unchecked((int)0xff000000) | random.Next(0x1000000)));
+                bitmap.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                var large = new OutputBufferResult { Code = "AUTO_COPY_READ", Method = "AUTO_CLIPBOARD",
+                    Detail = "CLEAN_FRAME|1", Text = new string('x', MaxCharacters) };
+                OutputAutoCopy.AttachFrame(large, png.ToArray());
+                var wire = Serialize(large);
+                if (wire.Length <= (MaxCharacters * 2 + 2) / 3 * 4 + 4096)
+                    throw new InvalidOperationException("Combined result did not exercise the old envelope boundary.");
+                using (var stream = new MemoryStream(System.Text.Encoding.ASCII.GetBytes(wire)))
+                using (var reader = new StreamReader(stream, System.Text.Encoding.ASCII))
+                {
+                    var combined = Parse(ReadBounded(reader).GetAwaiter().GetResult());
+                    if (combined.Text != large.Text || !OutputAutoCopy.FrameOf(combined).SequenceEqual(png.ToArray()))
+                        throw new InvalidOperationException("Maximum text plus clean PNG was lost at the worker envelope boundary.");
+                }
+            }
             result.Text = new string('x', MaxCharacters + 1);
             var oversize = false;
             try { Serialize(result); } catch (InvalidDataException) { oversize = true; }
             if (!oversize) throw new InvalidOperationException("Oversize buffer silently accepted.");
             CancellationSelfTest();
+            Console.WriteLine("PASS: clean auto-copy frame, UTC and text round-trip; failed/missing frame rejected");
             OutputAutoCopy.SelfTest();
         }
     }

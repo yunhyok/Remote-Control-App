@@ -407,9 +407,10 @@ namespace RemoteMonitorLink
             if (content.IndexOfAny(new[] { '\r', '\n' }) >= 0) throw new LocalVisionException("REGION_INVALID");
             string[] parts = content.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             var box = new int[4];
-            if (parts.Length != 5 || parts[0] != "OUTPUT_BOX") throw new LocalVisionException("REGION_INVALID");
+            int start = parts.Length == 5 && parts[0] == "OUTPUT_BOX" ? 1 : 0;
+            if (parts.Length != start + box.Length) throw new LocalVisionException("REGION_INVALID");
             for (int i = 0; i < box.Length; i++)
-                if (!int.TryParse(parts[i + 1], NumberStyles.None, CultureInfo.InvariantCulture, out box[i]) || box[i] > 1000)
+                if (!int.TryParse(parts[i + start], NumberStyles.None, CultureInfo.InvariantCulture, out box[i]) || box[i] > 1000)
                     throw new LocalVisionException("REGION_INVALID");
             if (box[2] <= box[0] || box[3] <= box[1]) throw new LocalVisionException("REGION_INVALID");
             // Integer arithmetic floors left/top and ceils right/bottom without overflow or shrinking the requested crop.
@@ -473,15 +474,23 @@ namespace RemoteMonitorLink
                 new Rectangle(0, 810, 1920, 270), "full-width Output pane is allowed");
             Check(ParseRegion(TestResponse("OUTPUT_BOX 0 0 1000 999"), "local-test", 1920, 1080).Bounds.Height == 1079,
                 "only an exact whole-frame crop is rejected");
-            foreach (string spacedBox in new[] { "OUTPUT_BOX  125 500 875 901", "OUTPUT_BOX 125\t500 875 901", "OUTPUT_BOX\t 125 \t500 875\t\t901" })
-                Check(ParseRegion(TestResponse(spacedBox), "local-test", 1921, 1081).Bounds == region.Bounds, "ASCII spaces and tabs may separate coordinates");
+            foreach (string spacedBox in new[] { "OUTPUT_BOX  125 500 875 901", "OUTPUT_BOX 125\t500 875 901", "OUTPUT_BOX\t 125 \t500 875\t\t901",
+                "125 500 875 901", "125\t 500 875\t901" })
+                Check(ParseRegion(TestResponse(spacedBox), "local-test", 1921, 1081).Bounds == region.Bounds, "exact coordinates accept optional OUTPUT_BOX and ASCII space/tab separators");
+            Check(ParseRegion(TestResponse("164 573 598 950"), "local-test", 1920, 1009).Bounds ==
+                ParseRegion(TestResponse("OUTPUT_BOX 164 573 598 950"), "local-test", 1920, 1009).Bounds,
+                "completed bare Qwen locator answer uses the same coordinate checks");
             foreach (string invalidBox in new[] { "OUTPUT_BOX 0 0 1000 1000", "OUTPUT_BOX -1 500 900 900", "OUTPUT_BOX 1 500 1001 900",
                 "OUTPUT_BOX 200 500 200 900", "OUTPUT_BOX 900 500 200 900", "OUTPUT_BOX 100 500 900 500", "OUTPUT_BOX 100 900 900 500",
                 "OUTPUT_BOX 0.5 500 900 900", "OUTPUT_BOX NaN 500 900 900", "OUTPUT_BOX Infinity 500 900 900", "OUTPUT_BOX 2147483648 500 900 900",
                 "OUTPUT_BOX +1 500 900 900", "OUTPUT_BOX 100 500 900", "OUTPUT_BOX 100 500 900 900 extra",
                 "OUTPUT_BOX 100 500\n900 900", "OUTPUT_BOX 100 500\r900 900", "OUTPUT_BOX 100\u00a0500 900 900", "output_box 100 500 900 900", "```\n" + boxText + "\n```",
-                "{\"box\":[100,500,900,900]}", "Here is the box: " + boxText, Unreadable + " because missing" })
+                "[100,500,900,900]", "{\"box\":[100,500,900,900]}", "Here is the box: " + boxText, Unreadable + " because missing" })
+            {
                 ExpectCode(() => ParseRegion(TestResponse(invalidBox), "local-test", 1920, 1080), "REGION_INVALID");
+                if (invalidBox.StartsWith("OUTPUT_BOX ", StringComparison.Ordinal))
+                    ExpectCode(() => ParseRegion(TestResponse(invalidBox.Substring("OUTPUT_BOX ".Length)), "local-test", 1920, 1080), "REGION_INVALID");
+            }
             ExpectCode(() => ParseRegion(TestResponse("OUTPUT_BOX 1 1 999 999"), "local-test", 2, 2), "REGION_INVALID");
             ExpectCode(() => ParseRegion(TestResponse(Unreadable), "local-test", 1920, 1080), "OUTPUT_UNREADABLE");
             ExpectCode(() => ParseRegion(boxResponse, "local-test", 1920, -1), "IMAGE_INVALID");
@@ -605,7 +614,7 @@ namespace RemoteMonitorLink
                 var frame = new PowerSiFrame { Png = encoded.ToArray(), PixelSize = bitmap.Size, CapturedUtc = DateTime.UtcNow };
                 PowerSiObservation previous = null;
                 foreach (string modelId in new[] { "local-test", "large-test" })
-                using (var server = new TestServer(new[] { models.Replace("local-test", modelId), TestResponse("OUTPUT_BOX 200 450 800 800"),
+                using (var server = new TestServer(new[] { models.Replace("local-test", modelId), TestResponse((modelId == "local-test" ? "OUTPUT_BOX " : "") + "200 450 800 800"),
                     models.Replace("local-test", modelId), validResponse }))
                 {
                     var result = await PowerSiVision.CaptureAsync(null, new LocalVisionSettings { Enabled = true, Port = server.Port },
@@ -618,6 +627,15 @@ namespace RemoteMonitorLink
                         Check(result.LocalSampleId == previous.LocalSampleId && result.LocalOcrSampleId == previous.LocalOcrSampleId &&
                             result.LocalImage.SequenceEqual(previous.LocalImage), "model swap reuses identical full and OCR images");
                     previous = result;
+                }
+                using (var server = new TestServer(new[] { models, TestResponse("50 50 950 300") }))
+                {
+                    var result = await PowerSiVision.CaptureAsync(null, new LocalVisionSettings { Enabled = true, Port = server.Port },
+                        CancellationToken.None, null, frame).ConfigureAwait(false);
+                    await server.Completion.ConfigureAwait(false);
+                    Check(result.Code == "OUTPUT_REGION_UNCONFIRMED" && result.LocalFailure == "CROP_OUTPUT_REGION_BOUNDARY_UNCONFIRMED" &&
+                        result.LocalImage == null && server.Requests.Count == 2,
+                        "bare coordinates for the wrong pane still fail the body boundary without an OCR request");
                 }
                 foreach (bool incomplete in new[] { false, true })
                 using (var server = new TestServer(new[] { models.Replace("local-test", "ocr-only-test"),
