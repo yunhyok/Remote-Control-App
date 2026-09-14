@@ -1,6 +1,6 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.57 복수 PowerSI 현장 수집 확인 / v0.1.58 진단 문구 정리·검증/게시 대기 / HFSS 새 task 인계**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. [HFSS-HANDOFF.md](HFSS-HANDOFF.md)는 새 task의 짧은 시작 문서 및 스킬 적용 계약이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.57 복수 PowerSI 현장 수집 확인 / v0.1.58 진단 문구 정리·검증/게시 완료 / HFSS 새 task 인계**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. [HFSS-HANDOFF.md](HFSS-HANDOFF.md)는 새 task의 짧은 시작 문서 및 스킬 적용 계약이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
@@ -257,6 +257,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.58-rc1` | `de64739` | `Remote-Monitor-Slave-v0.1.58-win11-net48.zip` | `C4035BE23D2DB6E9B36472B2879F0AEB88159BFCB8D7CF7B4BE751F3D21431AA` |
+| | | `Remote-Monitor-v0.1.58-win7-win11-net48.zip` | `3B302E7DB95B82A41711115847C5A39B73A53FD97B7E6F9BEA573860682D45A8` |
 | `v0.1.57-rc1` | `b1dfacf` | `Remote-Monitor-Slave-v0.1.57-win11-net48.zip` | `628E0B5E12758478683688F21B1A19BE36B48B0B5D12C39D35FCC00152D41527` |
 | | | `Remote-Monitor-v0.1.57-win7-win11-net48.zip` | `A9E4B0AE8DD2CB9947007B9B596374D76F811E0F95BC7A30CF1F75D8C26FF17D` |
 | `v0.1.56-rc1` | `c2a08b4` | `Remote-Monitor-Slave-v0.1.56-win11-net48.zip` | `A02F7BB4DD454125C7317F9FE4669643683AD28699B1CB7C00B6DFBE9105B9F9` |
@@ -290,7 +292,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.58 로컬 검증 완료·CI/게시 대기:** 진단 notes의 전역 최근 복사 코드만 제거하고 대상별 결과 분리 회귀 검사를 추가했다. 양쪽 Release 빌드 경고/오류0 및 실제 EXE 자체 검사를 통과했고, 새 per-PID diagnostic notes 검사는 PASS다. 로컬 전경/실제 입력 검사는 전경 권한이 없어 SKIP였다. 배포 CI/실제 게시 ZIP 확인 후 이 문단을 갱신한다. 현장 수집 근거는 §1의 v0.1.57이며 새 기능을 검증한 것으로 확대하지 않는다.
+**v0.1.58 검증/게시 완료:** 진단 notes의 전역 최근 복사 코드만 제거하고 대상별 결과 분리 회귀 검사를 추가했다. 로컬 양쪽 Release 빌드 경고/오류0 및 실제 EXE 자체 검사를 통과했고, 새 per-PID diagnostic notes 검사는 PASS다. 로컬 전경/실제 입력 검사는 전경 권한이 없어 SKIP였다. [배포 CI34821919901](https://github.com/yunhyok/Remote-Control-App/actions/runs/34821919901)은 build/release 성공이며 build job103905203668에서 새 PID별 notes·지연 전경·소유 TextBox 실제 반복 복사·두 PID 보존 검사가 모두 PASS였다. 현장 수집 근거는 §1의 v0.1.57이며 새 기능을 검증한 것으로 확대하지 않는다. 같은 현장 시험은 요구하지 않는다.
+
+v0.1.58-rc1의 두 ZIP/체크섬을 인증 헤더 없이 내려받아 Release API digest·SHA256SUMS·파일 해시를 대조했다. Slave189,298바이트/5파일, 전체425,229바이트/8파일이며 EXE FileVersion은 `0.1.58.0`, ProductVersion은 `0.1.58+de64739b87dd3744b36872fc77ffb7b5d2ac1c36`이다. 원격 태그도 같은 소스이며 패키지의 시험 안내에 동일 시험 불필요가 명시됐다. HFSS-HANDOFF.md와 AGENTS.md는 저장소의 개발 인계 문서로 관리한다. ZIP 안 HANDOFF의 CI 대기는 빌드 시점 기록이며 이 후속 문서가 최종 확인 기록이다. 태그/자산은 변경하지 않았다.
 
 **v0.1.57 검증/게시 완료:** 양쪽 Windows Release 빌드 경고/오류0 및 실제 EXE 자체 검사 통과. 목표 활성화를150ms 늦추는 소유 창 검사,1000ms 시간 초과, 제3의 창 거부, geometry 불변, 종료 단계 진단 필터, 새 오류 코드 검사를 추가했다. 새 지연 판독/기존 교차 큐/실제 입력 검사는 로컬 전경 권한이 없어 SKIP였으므로 로컬 통과로 간주하지 않는다. 첫 CI34817187900은 새 검사에서 기다림이 일찍 끝나 게시 전에 중단됐다. 두 번째 검사 창 생성 뒤 초기 전경을 명시적으로 설정/검증하고, 조기 완료 시 실제 오류를 보존하도록 검사만 보완했다. 제품의 대기·제3의 창 거부 조건은 완화하지 않았다. 보완 후 로컬 양쪽 빌드/EXE 검사를 다시 통과했다. [최종 소스 CI34817532799](https://github.com/yunhyok/Remote-Control-App/actions/runs/34817532799)는 build/release 모두 성공했고, build job103891353142에서 새 지연 전경·시간 초과·제3의 창 거부, 기존 교차 큐 전환, 실제 소유 TextBox 클릭/Ctrl+A/C/선택 해제/반복 복사, 두 PID 결과 보존이 모두 PASS였다. 게시 당시 미확인이던 실제 PowerSI 수집 및 첫 복사 뒤 두 번째 대상 전환은 이후 §1의080525 배치에서 한 번 확인했다.
 
