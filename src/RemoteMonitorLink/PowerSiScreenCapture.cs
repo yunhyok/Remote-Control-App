@@ -616,13 +616,20 @@ namespace RemoteMonitorLink
             {
                 Rect beforeWindow, beforeClient, afterWindow, afterClient;
                 ReadGeometry(second, out beforeWindow, out beforeClient);
+                // Establish the baseline after creating the second top-level window.
+                SetExactForeground(first);
                 RequireResponsive(second); // WM_NULL completes while first is still foreground.
+                RequireForeground(first, "SC_FOREGROUND_WAIT_MISMATCH");
                 using (var started = new ManualResetEvent(false))
                 {
                     var waiting = Task.Run(() => { started.Set(); WaitForExactForeground(second, first); });
                     if (!started.WaitOne(1000)) throw new InvalidOperationException("Readback check did not start.");
                     Thread.Sleep(150);
-                    if (waiting.IsCompleted) throw new InvalidOperationException("Readback rejected the old foreground before the deadline.");
+                    if (waiting.IsCompleted)
+                    {
+                        waiting.GetAwaiter().GetResult();
+                        throw new InvalidOperationException("Readback completed before target activation: " + WindowDiagnostic("selected", second));
+                    }
                     if (!SetForegroundWindow(second)) throw new InvalidOperationException("Owned readback target was not activated.");
                     if (!waiting.Wait(1500)) throw new InvalidOperationException("Readback did not observe late activation.");
                     waiting.GetAwaiter().GetResult();
