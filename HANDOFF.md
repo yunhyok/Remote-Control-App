@@ -1,6 +1,6 @@
 # Remote Monitor — 개발 인수인계
 
-기준: **2026-09-14, v0.1.57 실제 전경 도달 대기 / 로컬 검증 완료·CI/게시 대기 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
+기준: **2026-09-14, v0.1.57 실제 전경 도달 대기 / 로컬·CI 검증 및 v0.1.57-rc1 게시 완료 / 현장 미검증**. 이 문서와 SLAVE-TEST.md가 현재 기준이다. 아래 버전별 기록은 해당 시점의 이력이다.
 
 ## 1. 현재 상태와 사용자 결정
 
@@ -252,6 +252,8 @@ push/PR마다 CI(`windows-latest`)가 양쪽 Release 빌드와 실제 EXE `--sel
 
 | 태그 | 커밋 | 자산 | SHA256 |
 |---|---|---|---|
+| `v0.1.57-rc1` | `b1dfacf` | `Remote-Monitor-Slave-v0.1.57-win11-net48.zip` | `628E0B5E12758478683688F21B1A19BE36B48B0B5D12C39D35FCC00152D41527` |
+| | | `Remote-Monitor-v0.1.57-win7-win11-net48.zip` | `A9E4B0AE8DD2CB9947007B9B596374D76F811E0F95BC7A30CF1F75D8C26FF17D` |
 | `v0.1.56-rc1` | `c2a08b4` | `Remote-Monitor-Slave-v0.1.56-win11-net48.zip` | `A02F7BB4DD454125C7317F9FE4669643683AD28699B1CB7C00B6DFBE9105B9F9` |
 | | | `Remote-Monitor-v0.1.56-win7-win11-net48.zip` | `69935099174F39D24BF01CDFB93D876BC84F195CDE26A8C834762D3942296000` |
 | `v0.1.55-rc1` | `862b5d2` | `Remote-Monitor-Slave-v0.1.55-win11-net48.zip` | `4C06F95D0B24F43465F78181D357F943B7564BACF0B18501D4436B3B2CA9CF18` |
@@ -283,7 +285,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-slave-compa
 
 ## 10. 검증 범위와 저장 정책
 
-**v0.1.57 로컬 검증 완료·CI 재검사 대기:** 양쪽 Windows Release 빌드 경고/오류0 및 실제 EXE 자체 검사 통과. 목표 활성화를150ms 늦추는 소유 창 검사,1000ms 시간 초과, 제3의 창 거부, geometry 불변, 종료 단계 진단 필터, 새 오류 코드 검사를 추가했다. 새 지연 판독/기존 교차 큐/실제 입력 검사는 로컬 전경 권한이 없어 SKIP였으므로 통과했다고 간주하지 않는다. 첫 CI34817187900은 새 검사에서 기다림이 일찍 끝나 게시 전에 중단됐다. 두 번째 검사 창 생성 뒤 초기 전경을 명시적으로 설정/검증하고, 조기 완료 시 실제 오류를 보존하도록 검사만 보완했다. 제품의 대기·제3의 창 거부 조건은 완화하지 않았다. CI에서 실제 소유 창 검사와 게시 파일 검증을 이어간다. 실제 PowerSI 수집 성공 및 첫 수집 뒤 두 번째 대상의 foreground 권한은 현장 미검증이다.
+**v0.1.57 검증/게시 완료:** 양쪽 Windows Release 빌드 경고/오류0 및 실제 EXE 자체 검사 통과. 목표 활성화를150ms 늦추는 소유 창 검사,1000ms 시간 초과, 제3의 창 거부, geometry 불변, 종료 단계 진단 필터, 새 오류 코드 검사를 추가했다. 새 지연 판독/기존 교차 큐/실제 입력 검사는 로컬 전경 권한이 없어 SKIP였으므로 로컬 통과로 간주하지 않는다. 첫 CI34817187900은 새 검사에서 기다림이 일찍 끝나 게시 전에 중단됐다. 두 번째 검사 창 생성 뒤 초기 전경을 명시적으로 설정/검증하고, 조기 완료 시 실제 오류를 보존하도록 검사만 보완했다. 제품의 대기·제3의 창 거부 조건은 완화하지 않았다. 보완 후 로컬 양쪽 빌드/EXE 검사를 다시 통과했다. [최종 소스 CI34817532799](https://github.com/yunhyok/Remote-Control-App/actions/runs/34817532799)는 build/release 모두 성공했고, build job103891353142에서 새 지연 전경·시간 초과·제3의 창 거부, 기존 교차 큐 전환, 실제 소유 TextBox 클릭/Ctrl+A/C/선택 해제/반복 복사, 두 PID 결과 보존이 모두 PASS였다. 실제 PowerSI 수집 성공 및 첫 수집 뒤 두 번째 대상의 foreground 권한은 현장 미검증이다.
+
+v0.1.57-rc1의 두 ZIP과 SHA256SUMS.txt를 인증 헤더 없이 내려받아 Release API digest·파일 해시·체크섬에 대조했다. Slave ZIP은187,342바이트/5파일, 전체 ZIP은423,274바이트/8파일이며 예상 EXE/config/문서만 포함한다. 두 EXE의 FileVersion은 `0.1.57.0`, ProductVersion은 `0.1.57+b1dfacf11c8804345264db5b1ffde5b944532ac1`이고 원격 태그도 같은 소스다. ZIP 안 시험 안내는 v0.1.57/다른 앱을 유지한 두 PowerSI 한 번 수집 조건이다. ZIP 안 HANDOFF의 CI/게시 대기는 빌드 전 기록이고 이 후속 문서가 최종 검증 기록이다. 태그/배포 자산은 변경하지 않았다.
 
 **v0.1.56 검증/게시 완료:** Windows 양쪽 Release 경고/오류0 및 실제 EXE 자체 검사를 통과했다. 다른 PID 100개를 제외하는 선택 검사, 소유한 no-activate 실제 창의 최소화/비최소화 판정·네이티브 열거·거부 시 전경 불변, 숫자 진단 필터·음수 좌표 보존·UI 설명을 확인했다. 로컬 교차 큐 활성화/실제 마우스·키 입력은 전경 환경이 없어 SKIP했다. 독립 검토에서 순서 변경은 적절하지만 SC_MINIMIZED 관측 불일치의 확정 원인은 아니라는 점과, 진단 IO 실패가 실제 결과를 바꾸지 않도록 보완할 점을 확인했다. 후자를 수정하고 닫힌 진단 스트림 검사를 추가한 최종 소스로 양쪽 빌드/EXE 자체 검사를 다시 통과했다. [최종 소스 배포 CI 34815428056](https://github.com/yunhyok/Remote-Control-App/actions/runs/34815428056)은 build/release 모두 성공했다. build job `103884998319`에서 새 창 상태 검사·교차 큐 전경 완료·소유 TextBox의 실제 클릭/Ctrl+A/C/선택 해제/반복 복사와 PID별 결과 검사가 모두 PASS였다. 회사 PowerSI 두 개를 재현한 시험은 아니며 현장 검증을 대체하지 않는다.
 
