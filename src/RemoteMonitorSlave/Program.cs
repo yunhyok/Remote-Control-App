@@ -106,6 +106,8 @@ namespace RemoteMonitorSlave
                 ? result.LocalBodyDiagnostics : "UNKNOWN";
             return " mode=" + (result.LocalVisionMode == "OCR_ONLY" ? "OCR_ONLY crop_reused=1" : "LOCATE_OCR crop_reused=0") +
                 " request_timeout_s=" + Math.Max(0, Math.Min(90, result.LocalRequestTimeoutSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                " transcript_policy=" + LocalVisionClient.TranscriptPolicy +
+                " thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=" + LocalVisionClient.ReadMaxTokens.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                 " sample=" + Id(result.LocalSampleId) + " ocr_sample=" + Id(result.LocalOcrSampleId) +
                 " model_id=" + Label(model?.Id) + " model_name=" + Label(model?.DisplayName) + " model_key=" + Label(model?.Key) +
                 " quantization=" + Label(model?.Quantization) + " total_ms=" + Math.Max(0, result.LocalElapsedMs).ToString(System.Globalization.CultureInfo.InvariantCulture) +

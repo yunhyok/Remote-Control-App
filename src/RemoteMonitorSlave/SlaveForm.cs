@@ -971,7 +971,7 @@ namespace RemoteMonitorSlave
                     " / 자동 복사 설정: " +
                     (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + " / 전체 텍스트: " +
                     (buffer == null ? "없음" : buffer.Code + " " + buffer.Method + " " + buffer.Detail) +
-                    " / v" + LinkVersion.Value + "의 자동 복사·대조는 현장 미검증입니다."
+                    " / v0.1.51 자동 복사 1회 현장 성공. 연속 무인 복사·전체 줄 전사 여부는 미검증입니다."
             };
             for (int index = 0; runs != null && index < runs.Length; index++)
             {
@@ -1072,7 +1072,7 @@ namespace RemoteMonitorSlave
                             AccessibleName = "전사본과 전체 텍스트의 줄 단위 대조 결과",
                             Text = ComparisonFor(selected) ?? "원문 대조 없음 — 전체 텍스트 또는 전사본이 없는 실행입니다." });
                         texts.Panel2.Controls.Add(new Label { Dock = DockStyle.Top, Height = 22,
-                            Text = "원문 대조 — 전체 텍스트 기준 (Slave 화면/진단 묶음 전용)" });
+                            Text = "원문 대조 — 대응 행 검사만 수행 / 전체·최신 줄 전사 여부 미검증" });
                         AddVisionImages(right.Panel1, selected);
                     };
                     runSelector.SelectedIndex = runs.Length - 1;
@@ -1095,7 +1095,7 @@ namespace RemoteMonitorSlave
             var picture = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom,
                 AccessibleName = "LLM용으로 준비한 원본 또는 크롭 이미지" };
             var selector = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList,
-                AccessibleName = "Output 전체 본문, 문자 전사 입력, LLM 제안 영역 또는 PowerSI 전체 원본 선택" };
+                AccessibleName = "문자 전사 실제 입력, Output 전체 본문, LLM 제안 영역 또는 PowerSI 전체 원본 선택" };
             panel.Controls.Add(picture);
             panel.Controls.Add(new TextBox { Dock = DockStyle.Top, Height = 100, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
                 AccessibleName = "모델과 캡처 영역 및 판독 시간",
@@ -1113,8 +1113,8 @@ namespace RemoteMonitorSlave
                 using (var source = Image.FromStream(stream)) images.Add(new Bitmap(source));
                 selector.Items.Add(caption);
             }
-            Add(observation?.LocalPaneImage, "Output 전체 본문 — 제목줄 제외");
-            Add(observation?.LocalImage, observation?.LocalPaneImage == null ? "Output 크롭 — 문자 전사 입력 (영역 확인 필요)" : "문자 전사 입력 — 하단 확대");
+            Add(observation?.LocalImage, "문자 전사 실제 입력 — 하단 최대 256픽셀 / 이미지 안의 모든 줄 판독");
+            Add(observation?.LocalPaneImage, "Output 전체 본문 — 제목줄 제외 (OCR 입력은 하단 일부)");
             Add(observation?.LocalSuggestedImage, observation?.LocalVisionMode == "OCR_ONLY" ? "LLM 제안 영역 — 이전 실행에서 재사용" : "LLM 제안 영역 — 보정 전");
             Add(observation?.LocalFullImage, "PowerSI 전체 원본 — 영역 찾기 입력");
             selector.SelectedIndexChanged += delegate { picture.Image = images[selector.SelectedIndex]; };
@@ -1126,7 +1126,8 @@ namespace RemoteMonitorSlave
             return (observation?.LocalModelInfo?.Id ?? observation?.LocalModel ?? "모델 정보 없음") +
                 " / " + (observation?.LocalModelInfo?.Quantization ?? "양자화 미제공") +
                 " / " + ((observation?.LocalElapsedMs ?? 0) / 1000.0).ToString("0.00", CultureInfo.InvariantCulture) + "초" +
-                (observation?.LocalVisionMode == "OCR_ONLY" ? " / OCR만 (이전 크롭 재사용)" : "");
+                (observation?.LocalVisionMode == "OCR_ONLY" ? " / OCR만 (이전 크롭 재사용)" : "") +
+                " / thinking OFF 요청·실제 적용 미확인";
         }
 
         private static string FormatCpu(int? cpuPermille)
@@ -1220,6 +1221,14 @@ namespace RemoteMonitorSlave
             {
                 Directory.CreateDirectory(directory);
                 VisionSettingsStore.SelfTest(directory);
+                using (var settingsForm = new LocalVisionSettingsForm(new LocalVisionSettings()))
+                {
+                    var thinkingNote = settingsForm.Controls.OfType<Label>().Single(label => label.AccessibleName == "thinking 비활성화 요청과 실제 적용 여부 구분");
+                    if (!thinkingNote.Text.Contains("실제 적용 여부는 확인할 수 없습니다") ||
+                        !thinkingNote.Text.Contains("LM Studio에서도 thinking을 끄고") ||
+                        settingsForm.Controls.Cast<Control>().Any(control => control.Bottom > settingsForm.ClientSize.Height))
+                        throw new InvalidOperationException("Vision settings hide the thinking distinction or clip controls.");
+                }
                 using (var form = new SlaveForm(directory))
                 {
                     if (!form.Text.Contains(LinkVersion.Value) || form.server != null || form.identity != null ||
@@ -1387,8 +1396,8 @@ namespace RemoteMonitorSlave
                             throw new InvalidOperationException("Comparison lost full text/OCR or clipped panels.");
                         var selector = right.Panel1.Controls.OfType<ComboBox>().Single();
                         var picture = right.Panel1.Controls.OfType<PictureBox>().Single();
-                        if (selector.SelectedIndex != 0 || !selector.Text.StartsWith("Output 크롭") || picture.Image.Size != new Size(20, 10))
-                            throw new InvalidOperationException("Comparison did not default to actual crop.");
+                        if (selector.SelectedIndex != 0 || !selector.Text.StartsWith("문자 전사 실제 입력") || picture.Image.Size != new Size(20, 10))
+                            throw new InvalidOperationException("Comparison did not default to the actual OCR input.");
                         selector.SelectedIndex = 1;
                         if (!selector.Text.StartsWith("PowerSI 전체") || picture.Image.Size != new Size(40, 30))
                             throw new InvalidOperationException("Full source context unavailable.");
@@ -1446,7 +1455,8 @@ namespace RemoteMonitorSlave
                         var runs = comparison.Controls.OfType<ComboBox>().Single();
                         var newerPicture = right.Panel1.Controls.OfType<PictureBox>().Single();
                         if (runs.SelectedIndex != 1 || !runs.Text.Contains("gemma-31b / Q6_K / 2.00") ||
-                            Transcript(right).Text != largerModel.LocalEvidence || newerPicture.Image.Size != new Size(32, 16))
+                            !runs.Text.Contains("thinking OFF 요청·실제 적용 미확인") ||
+                            Transcript(right).Text != largerModel.LocalEvidence || newerPicture.Image.Size != new Size(20, 10))
                             throw new InvalidOperationException("Comparison did not select the latest model result.");
                         runs.SelectedIndex = 0;
                         var images = right.Panel1.Controls.OfType<ComboBox>().Single();
@@ -1455,11 +1465,11 @@ namespace RemoteMonitorSlave
                             columns.Panel1.Controls.OfType<TextBox>().Single().Text != fullBuffer.Text ||
                             Transcript(right).Text != excerptVision.LocalEvidence ||
                             !ReferenceEquals(form.lastObservation, largerModel) || !ReferenceEquals(form.lastBuffer, fullBuffer) ||
-                            images.Items.Count != 4 || !images.Text.StartsWith("Output 전체 본문") || picture.Image.Size != new Size(30, 15))
+                            images.Items.Count != 4 || !images.Text.StartsWith("문자 전사 실제 입력") || picture.Image.Size != new Size(20, 10))
                             throw new InvalidOperationException("Run selection changed saved state, leaked controls, or displayed the wrong OCR/crop.");
                         images.SelectedIndex = 1;
-                        if (!images.Text.StartsWith("문자 전사 입력") || picture.Image.Size != new Size(20, 10))
-                            throw new InvalidOperationException("Actual OCR input was not available separately from the full Output pane.");
+                        if (!images.Text.StartsWith("Output 전체 본문") || picture.Image.Size != new Size(30, 15))
+                            throw new InvalidOperationException("The full Output pane was not available separately from the actual OCR input.");
                         images.SelectedIndex = 2;
                         if (!images.Text.StartsWith("LLM 제안") || picture.Image.Size != new Size(10, 5))
                             throw new InvalidOperationException("Raw model-proposed crop was not retained.");
@@ -1524,7 +1534,8 @@ namespace RemoteMonitorSlave
                     var privateLog = File.ReadAllText(form.log.Path);
                     if (!privateLog.Contains("code=VISION_RUN") || !privateLog.Contains("model_id=gemma-e4b") || !privateLog.Contains("quantization=Q4_K_M") ||
                         !privateLog.Contains(" sample=" + new string('A', 64)) || !privateLog.Contains(" ocr_sample=" + new string('B', 64)) ||
-                        !privateLog.Contains("mode=OCR_ONLY crop_reused=1 request_timeout_s=90"))
+                        !privateLog.Contains("mode=OCR_ONLY crop_reused=1 request_timeout_s=90") ||
+                        !privateLog.Contains("transcript_policy=ALL_VISIBLE_V1 thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=4096"))
                         throw new InvalidOperationException("Selected model comparison metadata was not written to the log.");
                     if (!form.visionPreview.Enabled || !form.powerSi.Text.Contains("CONTENT_TEXT_CONTROL") ||
                         privateLog.Contains("private-response-sentinel") || privateLog.Contains("private-model-sentinel") ||
@@ -1617,7 +1628,7 @@ namespace RemoteMonitorSlave
                         var right = columns.Panel2.Controls.OfType<SplitContainer>().Single();
                         var report = Comparison(right).Text;
                         if (!report.StartsWith("전사본 2행 대조") || !report.Contains("일치 1") || !report.Contains("정규화 일치 1") ||
-                            !report.Contains("누락 0") || !report.Contains("860.000") ||
+                            !report.Contains("원문 대응 없음 0") || !report.Contains("전체 줄·최신 줄 전사 여부: 미검증") || !report.Contains("860.000") ||
                             Transcript(right).Text != anchorVision.LocalEvidence)
                             throw new InvalidOperationException("원문 대조 did not compare the transcript against the collected full text.");
                         var bundleButton = comparison.Controls.OfType<Panel>().Single().Controls.OfType<Button>().Single();

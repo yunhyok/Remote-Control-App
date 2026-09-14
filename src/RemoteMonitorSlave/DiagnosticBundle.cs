@@ -86,6 +86,10 @@ namespace RemoteMonitorSlave
             "구성: manifest.json(메타데이터/해시), full-text.txt(Output 전체 텍스트),\r\n" +
             "slave-log.txt(진단 로그 사본, 있는 경우), auto-copy-frame.png(자동 복사 실패 시의 화면, 있는 경우),\r\n" +
             "runs\\NN-이름\\ (화면 이미지, 대조 결과, 실행별 상세).\r\n" +
+            "ocr-input.png가 실제 문자 전사 입력이며 body.png 전체가 아니라 하단 최대 256픽셀을 사용합니다.\r\n" +
+            "전사 요청은 OCR 입력의 모든 줄 대상입니다. 전체 줄·최신 줄 전사 여부는 자동 검증하지 않습니다.\r\n" +
+            "'원문 대응 없음'은 원문에 대응하지 않는 전사 행 수이며, 읽지 않은 이미지 행 수가 아닙니다.\r\n" +
+            "thinking OFF는 앱의 요청값입니다. 실제 적용 여부는 미확인이므로 LM Studio 설정도 확인하세요.\r\n" +
             "transcript_format_validated는 응답 형식 검사 결과이며 문자 정확도 검증이 아닙니다.\r\n";
 
         internal static void Write(Stream target, DiagnosticBundleContent content)
@@ -236,6 +240,9 @@ namespace RemoteMonitorSlave
                 var readme = ReadEntryText(archive, "README.txt");
                 if (!readme.Contains("공개 저장소") || !readme.Contains("고유 정보"))
                     throw new InvalidOperationException("Diagnostic bundle README is missing the Korean sharing warning.");
+                if (!readme.Contains("ocr-input.png가 실제 문자 전사 입력") || !readme.Contains("전체 줄·최신 줄 전사 여부는 자동 검증하지 않습니다") ||
+                    !readme.Contains("'원문 대응 없음'") || !readme.Contains("thinking OFF는 앱의 요청값"))
+                    throw new InvalidOperationException("Diagnostic bundle lost the OCR input, completeness or thinking-status distinction.");
 
                 const string run1Dir = "runs/01-31B_Q4/";
                 const string run2Dir = "runs/02-E4B/";

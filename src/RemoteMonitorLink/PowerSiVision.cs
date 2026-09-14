@@ -112,8 +112,7 @@ namespace RemoteMonitorLink
                     modelInfo = read.ModelInfo;
                     var result = PowerSiObservation.VisionLogExcerpt(read.OutputText, frame.CapturedUtc);
                     result.LocalEvidence = "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]\r\n" +
-                        "캡처 UTC " + frame.CapturedUtc.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) +
-                        (read.ExcerptTruncated ? " / 앞부분 생략됨" : "") + "\r\n" +
+                        "캡처 UTC " + frame.CapturedUtc.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "\r\n" +
                         (read.OutputText ?? "[Output을 읽지 못했습니다]");
                     return Finish(result);
                 }

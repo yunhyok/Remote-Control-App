@@ -218,10 +218,11 @@ namespace RemoteMonitorLink
             var text = new StringBuilder();
             text.Append("전사본 ").Append(Number(lines.Count)).Append("행 대조 — 일치 ").Append(Number(Exact))
                 .Append(" / 정규화 일치 ").Append(Number(Normalized)).Append(" / 근사 ").Append(Number(Near))
-                .Append(" / 누락 ").Append(Number(Missing)).Append(" / 빈 줄 ").Append(Number(Empty))
+                .Append(" / 원문 대응 없음 ").Append(Number(Missing)).Append(" / 빈 줄 ").Append(Number(Empty))
                 .Append(OrderPreserved ? " / 순서 유지" : " / 순서 어긋남").Append("\r\n");
             text.Append("[원본 Output 텍스트 포함 — 로그에 남기지 말고 화면/진단 번들에서만 확인]\r\n");
-            text.Append("동일 원문 행은 한 번만 대응합니다. '누락'은 대응 원문 행을 찾지 못한 전사 행입니다.\r\n")
+            text.Append("'원문 대응 없음'은 대응 원문 행을 찾지 못한 전사 행 수입니다. 동일 원문 행은 한 번만 대응합니다.\r\n")
+                .Append("전체 줄·최신 줄 전사 여부: 미검증 — 실제 OCR 입력 이미지의 마지막 줄과 전사본을 비교하세요.\r\n")
                 .Append("전사하지 않은 원문 행의 누락률이나 OCR 정확도는 계산하지 않습니다. 복사/캡처 시각 차이도 확인하세요.\r\n");
             for (int i = 0; i < lines.Count; i++)
             {
@@ -248,7 +249,7 @@ namespace RemoteMonitorLink
                 case "NORMALIZED": return "정규화 일치";
                 case "NEAR": return "근사";
                 case "EMPTY": return "빈 줄";
-                default: return "누락";
+                default: return "원문 대응 없음";
             }
         }
 
@@ -275,7 +276,7 @@ namespace RemoteMonitorLink
             Check(mixed.Summary().IndexOf("alpha", StringComparison.Ordinal) < 0 &&
                 mixed.Summary().IndexOf("line", StringComparison.Ordinal) < 0, "summary never carries compared text");
             string report = mixed.Render();
-            Check(report.Contains("alpha line one") && report.Contains("beta  line two") && report.Contains("누락") &&
+            Check(report.Contains("alpha line one") && report.Contains("beta  line two") && report.Contains("원문 대응 없음 1") &&
                 report.Contains("순서 유지"), "rendered report keeps the per-line text for the bundle");
 
             var reordered = Compare(full, "GAMMA line three\nalpha line one");
@@ -304,8 +305,10 @@ namespace RemoteMonitorLink
             Check(nearRepeated.Near == 2 && nearRepeated.Lines[1].MatchedIndex == 1 && nearRepeated.OrderPreserved,
                 "equidistant near repeats consume sequential occurrences");
             var omitted = Compare("A\nB\nC", "A");
-            Check(omitted.Exact == 1 && omitted.Missing == 0 && omitted.Render().Contains("OCR 정확도는 계산하지 않습니다"),
-                "the report explains that untranscribed source lines are not measured as OCR accuracy");
+            Check(omitted.Exact == 1 && omitted.Missing == 0 && omitted.Summary() == "T1|1|1|0|0|0|0|1" &&
+                omitted.Render().Contains("원문 대응 없음 0") && omitted.Render().Contains("전체 줄·최신 줄 전사 여부: 미검증") &&
+                omitted.Render().Contains("OCR 정확도는 계산하지 않습니다") && !omitted.Render().Contains(" / 누락 "),
+                "a matching partial transcript keeps the T1 contract without claiming complete OCR coverage");
 
             var empty = Compare(null, null);
             Check(empty.Lines.Count == 0 && empty.OrderPreserved && empty.Summary() == "T1|0|0|0|0|0|0|1" &&
