@@ -1,4 +1,4 @@
-# Developer-only Windows PowerShell fixture. Uses synthetic data in an unshown form.
+﻿# Developer-only Windows PowerShell fixture. Uses synthetic data in an unshown form.
 param([Parameter(Mandatory=$true)][string]$ExecutablePath, [Parameter(Mandatory=$true)][string]$OutputDirectory, [switch]$Comparison, [switch]$OcrReplay)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -32,6 +32,7 @@ try {
             $graphics.DrawString('FULL WORKBENCH - SYNTHETIC FIXTURE', $form.Font, [Drawing.Brushes]::Black, 10, 10)
             $graphics.FillRectangle([Drawing.Brushes]::Black, 100, 300, 700, 300)
             $graphics.DrawString("Output - SYNTHETIC FIXTURE`r`n" + $excerpt, $form.Font, [Drawing.Brushes]::White, 110, 310)
+            $graphics.DrawString('LAST VISIBLE LINE - 1234567890', $form.Font, [Drawing.Brushes]::White, 110, 574)
             $fixture.Save($memory, [Drawing.Imaging.ImageFormat]::Png)
             $frameType = $assembly.GetType('RemoteMonitorLink.PowerSiFrame', $true)
             $frame = [Activator]::CreateInstance($frameType, $true)
@@ -40,7 +41,9 @@ try {
             $cropType = $assembly.GetType('RemoteMonitorLink.PowerSiScreenCapture', $true)
             $cropBounds = New-Object Drawing.Rectangle 100, 300, 700, 300
             $crop = $cropType.GetMethod('Crop', $static).Invoke($null, [object[]]@($frame, $cropBounds.PSObject.BaseObject))
-            $observationType.GetField('LocalImage', $instance).SetValue($observation, $crop)
+            $paneType = $assembly.GetType('RemoteMonitorLink.OutputPaneImage', $true)
+            $ocrInput = $paneType.GetMethod('OcrInput', $static).Invoke($null, [object[]]@($frame, $cropBounds.PSObject.BaseObject))
+            $observationType.GetField('LocalImage', $instance).SetValue($observation, $ocrInput)
             $observationType.GetField('LocalPaneImage', $instance).SetValue($observation, $crop)
             $observationType.GetField('LocalSuggestedImage', $instance).SetValue($observation, $crop)
             $observationType.GetField('LocalFrame', $instance).SetValue($observation, $frame)
@@ -77,10 +80,21 @@ try {
             $columns = $dialog.Controls[0]
             $right = $columns.Panel2.Controls[0]
             $selector = @($right.Panel1.Controls | Where-Object { $_ -is [Windows.Forms.ComboBox] })[0]
-            if ($selector.SelectedIndex -ne 0 -or -not $selector.Text.StartsWith('Output')) { throw 'Crop selection lost after creating native handles.' }
+            $picture = @($right.Panel1.Controls | Where-Object { $_ -is [Windows.Forms.PictureBox] })[0]
+            if ($selector.SelectedIndex -ne 0 -or -not $selector.Text.StartsWith('문자 전사 실제 입력') -or
+                $picture.Image.Width -ne 1400 -or $picture.Image.Height -ne 512) { throw 'Actual OCR input selection lost after creating native handles.' }
+            if ([Windows.Forms.TextRenderer]::MeasureText($selector.Text, $selector.Font).Width -gt $selector.ClientSize.Width - 24) {
+                throw 'OCR input caption is clipped.'
+            }
             Write-Output ('Native combo state: ' + $selector.SelectedIndex + ' / ' + $selector.Text)
+            $selector.SelectedIndex = 1
+            if (-not $selector.Text.StartsWith('Output 전체 본문') -or $picture.Image.Width -ne 700 -or $picture.Image.Height -ne 300) {
+                throw 'Whole pane is not distinct from the OCR input.'
+            }
+            $selector.SelectedIndex = 0
             $runs = @($dialog.Controls | Where-Object { $_ -is [Windows.Forms.ComboBox] })[0]
-            if ($runs.SelectedIndex -ne 0 -or -not $runs.Text.Contains('gemma-4-e4b-it-synthetic')) { throw 'Model run selection lost.' }
+            if ($runs.SelectedIndex -ne 0 -or -not $runs.Text.Contains('gemma-4-e4b-it-synthetic') -or
+                -not $runs.Text.Contains('thinking OFF 요청·실제 적용 미확인')) { throw 'Model run selection or thinking status lost.' }
             Write-Output ('Native run state: ' + $runs.Text)
         }
         $bitmap.Save((Join-Path $OutputDirectory 'slave-excerpt.png'), [Drawing.Imaging.ImageFormat]::Png)

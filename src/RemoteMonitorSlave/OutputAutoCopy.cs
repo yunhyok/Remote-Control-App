@@ -23,7 +23,7 @@ namespace RemoteMonitorSlave
     //
     // OutputAutoCopy
     //   const string WorkerArgument             = "--powersi-output-auto-copy".
-    //   argv of the worker: --powersi-output-auto-copy <sessionId> <pid:startTicks,...> <baselineSeq> <A2|...>
+    //   argv of the worker: --powersi-output-auto-copy <sessionId> <pid:startTicks,...> <A2|...>
     //   string LearnAnchor(IntPtr root, ProcessInventory inventory)
     //       Sampled by the existing --powersi-output-copy worker right after TryReadUserCopy succeeded.
     //       Returns "A1|..." or "ANCHOR_NONE|<REASON>" (FOREGROUND, IDENTITY, CURSOR, CLIENT, OUTSIDE, SERIALIZE, SAMPLE).
@@ -31,29 +31,30 @@ namespace RemoteMonitorSlave
     //   OutputAnchor AnchorOf(OutputBufferResult result)
     //       Reads that suffix back on the UI side (null when the worker learned nothing). The anchor is only a hint;
     //       phase 2 must confirm it with OutputPaneImage.FindBodyAt on the run's frame before storing it.
+    //   OutputAnchor AnchorFromVision(ProcessInventory, PowerSiObservation)
+    //       Builds a confirmed A2 anchor from a successful local-only LOCATE_ONLY result; no cursor sample or input.
     //   OutputBufferResult RunWorker(string[] args)
     //       Worker body, dispatched from OutputBufferCapture.TryRunWorker. Never throws for known failures; returns
     //       Code=AUTO_COPY_* / Method=NONE / Detail=<metadata or NONE>. Success: Code=AUTO_COPY_READ,
     //       Method=AUTO_CLIPBOARD, Detail="A2|anchorX|anchorY|bodyX|bodyY|bodyW|bodyH|clickScreenX|clickScreenY|B2|...".
     //       clickX/clickY are physical SCREEN coordinates of the injected click; the body rectangle is client-relative.
-    //   Task<OutputBufferResult> AutoCopyAsync(ProcessInventory, OutputAnchor, uint baseline, CancellationToken)
+    //   Task<OutputBufferResult> AutoCopyAsync(ProcessInventory, OutputAnchor, CancellationToken)
     //       UI-side helper. Spawns the worker process (8 s budget) so a hang cannot freeze the UI, and parses OB1.
     //       The anchor MUST carry a confirmed Body (A2); an A1 anchor is refused with AUTO_COPY_REQUEST_INVALID.
     //   byte[] FrameOf(OutputBufferResult result)
-    //       The worker capture taken after the click, present only on a failure result (null otherwise). It travels
+    //       The latest worker capture on failure, or the cleared pre-Ctrl+A capture on success. It travels
     //       in the optional 6th OB1 field; OutputBufferCapture.Serialize/Parse use AttachFrame/FrameOf for it.
     //   void SelfTest()                         Called from OutputBufferCapture.SelfTest(); Program.cs needs no change.
     //
-    // Worker order (v0.1.50): resolve window -> identity/client-size check -> occlusion hit test at the stored body
-    //   centre -> idle-input check -> one click at that centre -> settle -> fresh capture -> FindBodyAt around the
-    //   learned point must succeed, contain the click point and match the stored body within 8 px on every edge ->
-    //   foreground/cursor re-check -> Ctrl+A, Ctrl+C -> clipboard checks. Identity, client size and the hit test are
-    //   verified BEFORE the click; the pixels are verified BEFORE any key is sent. A pixel failure sends no keys.
+    // Worker order: fresh capture/body validation BEFORE any input, then resolve/recheck identity,
+    //   geometry, hit test and idle input -> click -> clean capture -> Ctrl+A/C -> guarded deselection click.
+    //   Highlighted/ambiguous bodies fail closed; we never click an old rectangle to make validation pass.
+    //   Closing the parent's stdin pipe requests cancellation; the host grants cleanup time before termination.
     //
     // Behaviour notes for phase 2:
     //   * The clipboard is NOT restored after an auto copy (the copied Output text is the result we hand to the caller).
     //   * The cursor position is saved before the click and restored best effort at the end of the worker, success or not.
-    //   * Exactly one click, one Ctrl+A and one Ctrl+C are injected; every key is released in a finally block.
+    //   * Two clicks and one Ctrl+A/C; cancellation or input interference skips further input, including cleanup.
     //   * Every stored coordinate is re-verified live (window identity, client size, body search, hit test, foreground).
     //   * The live part of SelfTest() replaces the current clipboard content with its own sample text and does not save
     //     or restore the previous content; it is skipped when no interactive foreground window can be obtained.
@@ -136,15 +137,14 @@ namespace RemoteMonitorSlave
     {
         internal const string WorkerArgument = "--powersi-output-auto-copy";
         internal const int BudgetMilliseconds = 8000;
-        private const int ClickHoldMilliseconds = 60;
         private const int ForegroundWaitMilliseconds = 600;
         private const int ChordGapMilliseconds = 80;
         private const int ClipboardWaitMilliseconds = 2000;
         internal const int MaxFramePng = 8 * 1024 * 1024;  // Same bound the capture worker enforces on a frame PNG.
-        private const int SettleMilliseconds = 150;   // Let the click repaint (deselect) before the pixels are read.
+        private const int SettleMilliseconds = 150;
         private const int BodyTolerance = 8;          // Per-edge client-pixel drift still accepted as "the same body".
 
-        // The capture taken after the click, kept so a failure can hand it back to the UI (worker process only).
+        // Pre-input capture, kept so a failure can hand it back to the UI (worker process only).
         private static byte[] capturedFrame;
         // The 6th OB1 field belongs to the result object, not to OutputBufferResult (a Link type that must not change).
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OutputBufferResult, byte[]> Frames =
@@ -198,7 +198,38 @@ namespace RemoteMonitorSlave
             return OutputAnchor.TryParse(result.Detail.Substring(separator + 1), out anchor) ? anchor : null;
         }
 
-        // Worker capture that travels in the optional 6th OB1 field. Only failure results carry one.
+        internal static OutputAnchor AnchorFromVision(ProcessInventory inventory, PowerSiObservation located)
+        {
+            try
+            {
+                if (inventory == null || located == null) return null;
+                inventory.Validate();
+                if (inventory.Items.Length != 1 || inventory.Omitted != 0) return null;
+                var identity = inventory.Items[0];
+                if (!ProcessInventory.IsPowerSiName(identity.Name) || !identity.StartUtcTicks.HasValue ||
+                    identity.StartUtcTicks.Value < 1 || located.Code != "OUTPUT_UNAVAILABLE" || !located.IsVision ||
+                    located.LocalVisionMode != "LOCATE_ONLY" || located.LocalFailure != null || !located.CapturedUtc.HasValue ||
+                    located.LocalFrame == null || located.LocalFrame.Png == null || located.LocalImage == null ||
+                    located.LocalPaneImage == null || !ReferenceEquals(located.LocalFullImage, located.LocalFrame.Png) ||
+                    located.LocalFrameSize != located.LocalFrame.PixelSize || located.LocalFrameSize.IsEmpty || located.LocalVisibleEmpty ||
+                    located.LocalFrame.CapturedUtc != located.CapturedUtc.Value) return null;
+                var body = located.LocalOutputBody;
+                var size = located.LocalFrameSize;
+                if (body.X < 0 || body.Y < 0 || body.Width < 1 || body.Height < 1 ||
+                    body.Width > size.Width || body.Height > size.Height ||
+                    body.X > size.Width - body.Width || body.Y > size.Height - body.Height) return null;
+                var center = new Point(body.X + body.Width / 2, body.Y + body.Height / 2);
+                var anchor = new OutputAnchor { Pid = identity.Pid, StartUtcTicks = identity.StartUtcTicks.Value,
+                    SessionId = inventory.SessionId, ClientPoint = center, ClientSize = size,
+                    LearnedUtc = located.CapturedUtc.Value, Body = body };
+                OutputAnchor parsed;
+                return OutputAnchor.TryParse(anchor.Serialize(), out parsed) && parsed.Matches(anchor) && parsed.Body == body
+                    ? parsed : null;
+            }
+            catch { return null; }
+        }
+
+        // Worker capture that travels in the optional 6th OB1 field; never a log or network payload.
         internal static void AttachFrame(OutputBufferResult result, byte[] png)
         {
             if (result == null || png == null || png.Length == 0) return;
@@ -211,10 +242,21 @@ namespace RemoteMonitorSlave
             return result != null && Frames.TryGetValue(result, out png) ? png : null;
         }
 
+        internal static PowerSiFrame CleanFrameOf(OutputBufferResult result)
+        {
+            if (result?.Code != "AUTO_COPY_READ" || result.Method != "AUTO_CLIPBOARD" || result.Text == null)
+                throw new InvalidDataException("AUTO_COPY_FRAME_INVALID");
+            var png = FrameOf(result);
+            var parts = (result.Detail ?? "").Split('|');
+            if (png == null || parts.Length < 2 || parts[parts.Length - 2] != "CLEAN_FRAME")
+                throw new InvalidDataException("AUTO_COPY_FRAME_INVALID");
+            return PowerSiScreenCapture.Parse("SC1|" + parts[parts.Length - 1] + "|" + Convert.ToBase64String(png));
+        }
+
         // ---------------------------------------------------------------- UI side
 
         internal static Task<OutputBufferResult> AutoCopyAsync(ProcessInventory inventory, OutputAnchor anchor,
-            uint baseline, CancellationToken cancellation)
+            CancellationToken cancellation)
         {
             string arguments;
             try
@@ -236,7 +278,7 @@ namespace RemoteMonitorSlave
                 var identities = string.Join(",", inventory.Items.Select(p => p.Pid.ToString(CultureInfo.InvariantCulture) + ":" +
                     p.StartUtcTicks.Value.ToString(CultureInfo.InvariantCulture)));
                 arguments = WorkerArgument + " " + inventory.SessionId.ToString(CultureInfo.InvariantCulture) + " " + identities +
-                    " " + baseline.ToString(CultureInfo.InvariantCulture) + " " + serialized;
+                    " " + serialized;
             }
             catch (OperationCanceledException) { throw; }
             catch { return Task.FromResult(Result("AUTO_COPY_REQUEST_INVALID", null)); }
@@ -249,21 +291,49 @@ namespace RemoteMonitorSlave
         internal static OutputBufferResult RunWorker(string[] args)
         {
             capturedFrame = null;
+            using (var cancellation = new CancellationTokenSource(BudgetMilliseconds))
             try
             {
-                uint baseline;
+                // Owned-process cancellation check: this mode cannot resolve a target or inject input.
+                if (args != null && args.Length == 2 && args[0] == WorkerArgument && args[1] == "--self-test-cancel")
+                {
+                    WatchParent(cancellation);
+                    Console.WriteLine("READY"); Console.Out.Flush();
+                    try { Pause(BudgetMilliseconds, cancellation.Token); }
+                    catch (OperationCanceledException) { }
+                    finally { capturedFrame = null; }
+                    return Result("AUTO_COPY_TEST_CLEANUP", null);
+                }
                 OutputAnchor anchor;
-                if (args == null || args.Length != 5 || args[0] != WorkerArgument ||
-                    !uint.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out baseline) ||
-                    !OutputAnchor.TryParse(args[4], out anchor) || !anchor.HasBody)
+                if (args == null || args.Length != 4 || args[0] != WorkerArgument ||
+                    !OutputAnchor.TryParse(args[3], out anchor) || !anchor.HasBody)
                     throw Failure("AUTO_COPY_REQUEST_INVALID", null);
-                var result = Run(args, anchor, baseline);
-                capturedFrame = null; // A successful copy returns the Output text, not a screenshot.
+                WatchParent(cancellation);
+                var result = Run(args, anchor, cancellation.Token);
+                capturedFrame = null; // Success already attached its clean frame to the result.
                 return result;
             }
             catch (AutoCopyException error) { return Failed(error.Message, error.Detail); }
+            catch (OperationCanceledException) { return Failed("AUTO_COPY_CANCELLED", null); }
             catch (InvalidDataException error) { return Failed(error.Message, null); }
             catch { return Failed("AUTO_COPY_FAILED", null); }
+        }
+
+        internal static void WatchParent(CancellationTokenSource cancellation)
+        {
+            // An owned stdin pipe is the cancellation channel, not a command/data channel. EOF also covers
+            // normal parent shutdown. No injected input is performed by this background reader.
+            Task.Run(() =>
+            {
+                try { Console.In.ReadLine(); } catch { }
+                try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+            });
+        }
+
+        private static void Pause(int milliseconds, CancellationToken cancellation)
+        {
+            cancellation.WaitHandle.WaitOne(milliseconds);
+            cancellation.ThrowIfCancellationRequested();
         }
 
         // Every failure after the fresh capture hands that capture back so the UI can keep it for the bundle.
@@ -276,17 +346,23 @@ namespace RemoteMonitorSlave
             return result;
         }
 
-        private static OutputBufferResult Run(string[] args, OutputAnchor anchor, uint baseline)
+        private static OutputBufferResult Run(string[] args, OutputAnchor anchor, CancellationToken cancellation)
         {
             var targetArgs = new[] { args[0], args[1], args[2] };
             var inventory = OutputBufferCapture.ParseInventory(args[1], args[2]);
             var root = PowerSiScreenCapture.ResolveWindow(targetArgs); // Fresh HWND plus full PowerSI identity checks.
             CheckTarget(root, inventory, anchor);
 
-            // The click lands on the centre of the body this anchor was confirmed on. Its identity, its client size
-            // and the hit test at this exact point are all verified live first; the pixels are verified afterwards.
             var stored = anchor.Body;
             var clickClient = new Point(stored.X + stored.Width / 2, stored.Y + stored.Height / 2);
+            cancellation.ThrowIfCancellationRequested();
+            var frame = CaptureFrame(root);
+            capturedFrame = frame.Png != null && frame.Png.Length <= MaxFramePng ? frame.Png : null;
+            string summary;
+            var body = ConfirmBody(frame, anchor, clickClient, cancellation, out summary);
+            cancellation.ThrowIfCancellationRequested();
+            if (PowerSiScreenCapture.ResolveWindow(targetArgs) != root) throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
+            CheckTarget(root, inventory, anchor);
             var target = new NativePoint { X = clickClient.X, Y = clickClient.Y };
             if (!ClientToScreen(root, ref target)) throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
             CheckOccluder(root, target);
@@ -296,55 +372,94 @@ namespace RemoteMonitorSlave
             NativePoint saved;
             var savedCursor = GetPhysicalCursorPos(out saved);
             OutputBufferResult copied;
-            Rectangle body;
-            string summary;
+            PowerSiFrame cleanFrame;
             try
             {
+                cancellation.ThrowIfCancellationRequested();
                 if (!SetPhysicalCursorPos(target.X, target.Y)) throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
                 NativePoint current;
                 if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y)
                     throw Failure("AUTO_COPY_CURSOR_NOT_SET", null);
-                CheckOccluder(root, current);
-                if ((GetSystemMetrics(SwapButtonMetric) != 0) != swapped) throw Failure("AUTO_COPY_INPUT_BUSY", null);
-                ClickOnce(swapped);
-                Thread.Sleep(SettleMilliseconds);
-
-                // Pixels decide whether a key is ever sent. The click also deselects any highlighted text, so the
-                // flat-background body search sees the same neutral pane the learning run saw.
-                BodySearchDiagnostics diagnostics;
-                var frame = CaptureFrame(root);
-                capturedFrame = frame.Png != null && frame.Png.Length <= MaxFramePng ? frame.Png : null;
-                try { body = OutputPaneImage.FindBodyAt(frame, anchor.ClientPoint, CancellationToken.None, out diagnostics); }
-                catch (LocalVisionException error) { throw Failure("AUTO_COPY_BODY_UNCONFIRMED", Sanitize(error.Detail)); }
-                summary = diagnostics == null ? "NONE" : Sanitize(diagnostics.Summary());
-                if (body.Width < 1 || body.Height < 1 || !body.Contains(anchor.ClientPoint) || !body.Contains(clickClient) ||
-                    body.X < 0 || body.Y < 0 || body.Right > anchor.ClientSize.Width || body.Bottom > anchor.ClientSize.Height)
-                    throw Failure("AUTO_COPY_BODY_UNCONFIRMED", summary);
-                if (Math.Abs(body.X - stored.X) > BodyTolerance || Math.Abs(body.Y - stored.Y) > BodyTolerance ||
-                    Math.Abs(body.Right - stored.Right) > BodyTolerance || Math.Abs(body.Bottom - stored.Bottom) > BodyTolerance)
-                    throw Failure("AUTO_COPY_BODY_MOVED", summary);
-
-                WaitForeground(root);
-                if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y)
-                    throw Failure("AUTO_COPY_CURSOR_MOVED", null);
-                CheckOccluder(root, current);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                ClickOnce(root, swapped);
+                var sinceClick = Stopwatch.StartNew();
+                Pause(SettleMilliseconds, cancellation);
+                WaitForeground(root, cancellation);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                // OCR must see the deselected state, not the selection we are about to create for copying.
+                cleanFrame = CaptureFrame(root);
+                capturedFrame = cleanFrame.Png;
+                ConfirmBody(cleanFrame, anchor, clickClient, cancellation, out summary);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
                 Chord(root, VirtualA);
-                Thread.Sleep(ChordGapMilliseconds);
+                Pause(ChordGapMilliseconds, cancellation);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                // A manual copy earlier in this run must not count as success if this Ctrl+C does nothing.
+                uint baseline = OutputBufferCapture.ClipboardSequence;
                 Chord(root, VirtualC);
-                copied = ReadCopiedText(inventory, baseline);
+                copied = ReadCopiedText(inventory, baseline, cancellation);
+                // Keep this a single click rather than the second half of a double-click (which selects a word).
+                Pause(Math.Max(0, System.Windows.Forms.SystemInformation.DoubleClickTime + 1 - (int)sinceClick.ElapsedMilliseconds), cancellation);
+                CheckInputTarget(root, inventory, anchor, clickClient, target, swapped, cancellation);
+                if (RootOf(GetForegroundWindow()) != root) throw Failure("AUTO_COPY_FOREGROUND_FAILED", null);
+                ClickOnce(root, swapped);
+                Pause(SettleMilliseconds, cancellation);
             }
-            finally { if (savedCursor) { try { SetPhysicalCursorPos(saved.X, saved.Y); } catch { } } }
+            finally
+            {
+                // Do not undo a real user's movement while stopping; restore only our own last cursor position.
+                NativePoint current;
+                if (savedCursor && GetPhysicalCursorPos(out current) && current.X == target.X && current.Y == target.Y)
+                    try { SetPhysicalCursorPos(saved.X, saved.Y); } catch { }
+            }
 
             if (PowerSiScreenCapture.ResolveWindow(targetArgs) != root) throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
             copied.Code = "AUTO_COPY_READ";
             copied.Method = "AUTO_CLIPBOARD";
             copied.Detail = Sanitize(string.Join("|", "A2", Text(anchor.ClientPoint.X), Text(anchor.ClientPoint.Y),
-                Text(body.X), Text(body.Y), Text(body.Width), Text(body.Height), Text(target.X), Text(target.Y), summary));
+                Text(body.X), Text(body.Y), Text(body.Width), Text(body.Height), Text(target.X), Text(target.Y), summary,
+                "CLEAN_FRAME", cleanFrame.CapturedUtc.Ticks.ToString(CultureInfo.InvariantCulture)));
+            AttachFrame(copied, cleanFrame.Png);
             return copied;
+        }
+
+        private static Rectangle ConfirmBody(PowerSiFrame frame, OutputAnchor anchor, Point click,
+            CancellationToken cancellation, out string summary)
+        {
+            if (frame.PixelSize != anchor.ClientSize) throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
+            BodySearchDiagnostics diagnostics;
+            Rectangle body;
+            try { body = OutputPaneImage.FindBodyAt(frame, anchor.ClientPoint, cancellation, out diagnostics); }
+            catch (LocalVisionException error) { throw Failure("AUTO_COPY_BODY_UNCONFIRMED", Sanitize(error.Detail)); }
+            summary = diagnostics == null ? "NONE" : Sanitize(diagnostics.Summary());
+            if (!body.Contains(click)) throw Failure("AUTO_COPY_BODY_UNCONFIRMED", summary);
+            var stored = anchor.Body;
+            if (Math.Abs(body.X - stored.X) > BodyTolerance || Math.Abs(body.Y - stored.Y) > BodyTolerance ||
+                Math.Abs(body.Right - stored.Right) > BodyTolerance || Math.Abs(body.Bottom - stored.Bottom) > BodyTolerance)
+                throw Failure("AUTO_COPY_BODY_MOVED", summary);
+            return body;
+        }
+
+        private static void CheckInputTarget(IntPtr root, ProcessInventory inventory, OutputAnchor anchor,
+            Point click, NativePoint expected, bool swapped, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            CheckTarget(root, inventory, anchor);
+            var currentTarget = new NativePoint { X = click.X, Y = click.Y };
+            if (!ClientToScreen(root, ref currentTarget) || currentTarget.X != expected.X || currentTarget.Y != expected.Y)
+                throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
+            NativePoint current;
+            if (!GetPhysicalCursorPos(out current) || current.X != expected.X || current.Y != expected.Y)
+                throw Failure("AUTO_COPY_CURSOR_MOVED", null);
+            CheckOccluder(root, current);
+            RequireIdleInput();
+            if ((GetSystemMetrics(SwapButtonMetric) != 0) != swapped) throw Failure("AUTO_COPY_INPUT_BUSY", null);
+            cancellation.ThrowIfCancellationRequested();
         }
 
         private static void CheckTarget(IntPtr root, ProcessInventory inventory, OutputAnchor anchor)
         {
+            PowerSiScreenCapture.RequireResponsive(root);
             uint pid;
             if (GetWindowThreadProcessId(root, out pid) == 0 || pid == 0 || (int)pid != anchor.Pid)
                 throw Failure("AUTO_COPY_WINDOW_CHANGED", null);
@@ -370,24 +485,25 @@ namespace RemoteMonitorSlave
             return captured;
         }
 
-        private static OutputBufferResult ReadCopiedText(ProcessInventory inventory, uint baseline)
+        private static OutputBufferResult ReadCopiedText(ProcessInventory inventory, uint baseline, CancellationToken cancellation)
         {
             var clock = Stopwatch.StartNew();
             while (OutputBufferCapture.ClipboardSequence == baseline)
             {
                 if (clock.ElapsedMilliseconds >= ClipboardWaitMilliseconds) throw Failure("AUTO_COPY_NO_CLIPBOARD", null);
-                Thread.Sleep(50);
+                Pause(50, cancellation);
             }
             // The copying application may still hold the clipboard open for a moment; a few read-only retries only.
             for (var attempt = 0; attempt < 4; attempt++)
             {
+                cancellation.ThrowIfCancellationRequested();
                 OutputBufferResult result;
                 if (OutputBufferCapture.TryReadUserCopy(inventory, baseline, out result) && result != null)
                 {
                     if (result.Text == null) throw Failure("AUTO_COPY_CLIPBOARD_SIZE", Sanitize(result.Code));
                     return result;
                 }
-                Thread.Sleep(50);
+                Pause(50, cancellation);
             }
             throw Failure("AUTO_COPY_CLIPBOARD_FOREIGN", null);
         }
@@ -443,39 +559,40 @@ namespace RemoteMonitorSlave
                 if (GetAsyncKeyState(key) < 0) throw Failure("AUTO_COPY_INPUT_BUSY", null); // High bit: physically held.
         }
 
-        private static void WaitForeground(IntPtr root)
+        private static void WaitForeground(IntPtr root, CancellationToken cancellation)
         {
             var clock = Stopwatch.StartNew();
             while (RootOf(GetForegroundWindow()) != root)
             {
                 if (clock.ElapsedMilliseconds >= ForegroundWaitMilliseconds) throw Failure("AUTO_COPY_FOREGROUND_FAILED", null);
-                Thread.Sleep(20);
+                Pause(20, cancellation);
             }
         }
 
-        // Exactly one press and one release; the release is attempted in the finally even when the hold fails.
-        private static void ClickOnce(bool swapped)
+        // Submit press/release together: no cancellable hold or inter-packet sleep can leave the button down.
+        private static void ClickOnce(IntPtr root, bool swapped)
         {
-            var down = new[] { Mouse(swapped ? MouseRightDown : MouseLeftDown) };
-            var up = new[] { Mouse(swapped ? MouseRightUp : MouseLeftUp) };
-            var pressed = false;
-            var released = -1;
+            PowerSiScreenCapture.RequireResponsive(root);
+            var packets = ComposeClick(swapped);
+            int inserted = -1;
             try
             {
-                if (Send(down) != 1) throw Failure("AUTO_COPY_CLICK_FAILED", null);
-                pressed = true;
-                Thread.Sleep(ClickHoldMilliseconds);
+                inserted = (int)Send(packets);
+                if (inserted != packets.Length) throw Failure("AUTO_COPY_CLICK_FAILED", null);
             }
             finally
             {
-                if (pressed) { try { released = (int)Send(up); } catch { released = -1; } }
+                if (inserted == 1 || inserted == -1) try { Send(new[] { packets[1] }); } catch { }
             }
-            if (released != 1) throw Failure("AUTO_COPY_CLICK_FAILED", null);
         }
+
+        private static Input[] ComposeClick(bool swapped)
+        { return new[] { Mouse(swapped ? MouseRightDown : MouseLeftDown), Mouse(swapped ? MouseRightUp : MouseLeftUp) }; }
 
         private static void Chord(IntPtr root, ushort key)
         {
             if (RootOf(GetForegroundWindow()) != root) throw Failure("AUTO_COPY_FOREGROUND_LOST", null);
+            PowerSiScreenCapture.RequireResponsive(root);
             var packets = ComposeChord(key);
             var returned = false;
             var inserted = 0;
@@ -557,9 +674,46 @@ namespace RemoteMonitorSlave
         internal static void SelfTest()
         {
             AnchorSelfTest();
+            VisionAnchorSelfTest();
             DetailSelfTest();
             LayoutSelfTest();
+            PreflightSelfTest();
             Console.WriteLine(LiveTest());
+        }
+
+        private static void PreflightSelfTest()
+        {
+            var body = new Rectangle(20, 40, 360, 320);
+            var anchor = new OutputAnchor { ClientPoint = new Point(200, 200), ClientSize = new Size(600, 420), Body = body };
+            foreach (var scenario in new[] { "SAME", "MOVED", "SELECTED" })
+            using (var bitmap = new Bitmap(600, 420))
+            using (var graphics = Graphics.FromImage(bitmap))
+            using (var png = new MemoryStream())
+            {
+                graphics.Clear(Color.DarkBlue);
+                var current = scenario == "MOVED" ? new Rectangle(40, 40, 340, 320) : body;
+                graphics.FillRectangle(scenario == "SELECTED" ? Brushes.DodgerBlue : Brushes.White, current);
+                bitmap.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                var frame = new PowerSiFrame { Png = png.ToArray(), PixelSize = bitmap.Size };
+                string summary;
+                try
+                {
+                    Need(ConfirmBody(frame, anchor, anchor.ClientPoint, CancellationToken.None, out summary) == body && scenario == "SAME",
+                        "pre-input body identity");
+                }
+                catch (AutoCopyException error)
+                {
+                    Need((scenario == "MOVED" && error.Message == "AUTO_COPY_BODY_MOVED") ||
+                        (scenario == "SELECTED" && error.Message == "AUTO_COPY_BODY_UNCONFIRMED"), "changed/selected body rejected before input");
+                }
+                using (var cancelled = new CancellationTokenSource())
+                {
+                    cancelled.Cancel();
+                    try { ConfirmBody(frame, anchor, anchor.ClientPoint, cancelled.Token, out summary); throw new InvalidOperationException("Cancelled preflight ran."); }
+                    catch (OperationCanceledException) { }
+                }
+            }
+            Console.WriteLine("PASS: pre-input body guards (unchanged, moved pane, highlighted pane, cancellation)");
         }
 
         private static void Need(bool condition, string name)
@@ -613,6 +767,56 @@ namespace RemoteMonitorSlave
                 Need(!OutputAnchor.TryParse(invalid, out rejected) && rejected == null, "malformed confirmed anchor rejected: " + invalid);
             }
             Need(Sanitize(confirmedText) == confirmedText, "confirmed anchor survives the OB1 detail character set");
+        }
+
+        private static void VisionAnchorSelfTest()
+        {
+            var captured = new DateTime(2026, 9, 14, 1, 2, 3, DateTimeKind.Utc);
+            var size = new Size(1920, 1009);
+            var body = new Rectangle(317, 393, 585, 560);
+            ProcessInventory Inventory(params ProcessState[] items)
+            {
+                return new ProcessInventory { SessionId = 2, Items = items };
+            }
+            PowerSiObservation Located(Rectangle outputBody, Size frameSize)
+            {
+                var png = new byte[] { 1, 2, 3 };
+                var result = PowerSiObservation.VisionLogExcerpt(null, captured);
+                result.LocalFrame = new PowerSiFrame { Png = png, PixelSize = size, CapturedUtc = captured };
+                result.LocalFullImage = png;
+                result.LocalImage = new byte[] { 4 };
+                result.LocalPaneImage = new byte[] { 5 };
+                result.LocalFrameSize = frameSize;
+                result.LocalOutputBody = outputBody;
+                result.LocalVisionMode = "LOCATE_ONLY";
+                return result;
+            }
+            var identity = new ProcessState { Pid = 4321, Name = "powersi", StartUtcTicks = 638000000000000000L };
+            var inventory = Inventory(identity);
+            var located = Located(body, size);
+            var anchor = AnchorFromVision(inventory, located);
+            Need(anchor != null && anchor.HasBody && anchor.Pid == identity.Pid &&
+                anchor.StartUtcTicks == identity.StartUtcTicks && anchor.SessionId == inventory.SessionId &&
+                anchor.ClientSize == size && anchor.Body == body && anchor.ClientPoint == new Point(609, 673) &&
+                anchor.LearnedUtc == captured && anchor.Serialize().StartsWith("A2|", StringComparison.Ordinal),
+                "locator result becomes a validated A2 centre anchor");
+            located.LocalVisibleEmpty = true;
+            Need(AnchorFromVision(inventory, located) == null, "visibly empty pane never authorizes input");
+            located.LocalVisibleEmpty = false;
+
+            Need(AnchorFromVision(null, located) == null && AnchorFromVision(inventory, null) == null &&
+                AnchorFromVision(inventory, Located(Rectangle.Empty, size)) == null,
+                "missing locator anchor evidence rejected");
+            var failed = Located(body, size); failed.LocalFailure = "LOCATE_OUTPUT_INVALID";
+            Need(AnchorFromVision(inventory, failed) == null &&
+                AnchorFromVision(inventory, Located(new Rectangle(1800, 900, 200, 200), size)) == null &&
+                AnchorFromVision(inventory, Located(body, new Size(1919, 1009))) == null,
+                "failed, outside, and size-mismatched locator geometry rejected");
+            Need(AnchorFromVision(Inventory(
+                    identity, new ProcessState { Pid = 4322, Name = "pwrsi", StartUtcTicks = 638000000000000001L }), located) == null &&
+                AnchorFromVision(Inventory(new ProcessState { Pid = 4321, Name = "powersi" }), located) == null &&
+                AnchorFromVision(Inventory(new ProcessState { Pid = 4321, Name = "other", StartUtcTicks = identity.StartUtcTicks }), located) == null,
+                "non-singleton or incomplete PowerSI identity rejected");
         }
 
         private static void DetailSelfTest()
@@ -683,8 +887,10 @@ namespace RemoteMonitorSlave
             }
             foreach (var swapped in new[] { false, true })
             {
-                var down = Mouse(swapped ? MouseRightDown : MouseLeftDown);
-                var up = Mouse(swapped ? MouseRightUp : MouseLeftUp);
+                var packets = ComposeClick(swapped);
+                Need(packets.Length == 2, "press/release submitted in one batch");
+                var down = packets[0];
+                var up = packets[1];
                 Need(down.Type == InputMouse && up.Type == InputMouse &&
                     down.Union.Mouse.Flags == (swapped ? MouseRightDown : MouseLeftDown) &&
                     up.Union.Mouse.Flags == (swapped ? MouseRightUp : MouseLeftUp) &&
@@ -740,12 +946,16 @@ namespace RemoteMonitorSlave
                     NativePoint current;
                     if (!GetPhysicalCursorPos(out current) || current.X != target.X || current.Y != target.Y) return Skip;
                     if (RootOf(WindowFromPhysicalPoint(current)) != form.Handle) return Skip;
-                    var baseline = OutputBufferCapture.ClipboardSequence;
-                    ClickOnce(GetSystemMetrics(SwapButtonMetric) != 0);
+                    ClickOnce(form.Handle, GetSystemMetrics(SwapButtonMetric) != 0);
                     Pump(ForegroundWaitMilliseconds, () => false);
                     Need(GetForegroundWindow() == form.Handle, "live test window stayed foreground");
                     Chord(form.Handle, VirtualA);
                     Pump(ChordGapMilliseconds, () => false);
+                    System.Windows.Forms.Clipboard.SetText("earlier copy must not count as automatic success");
+                    var baseline = OutputBufferCapture.ClipboardSequence;
+                    try { ReadCopiedText(null, baseline, CancellationToken.None); throw new InvalidOperationException("Stale clipboard accepted without Ctrl+C."); }
+                    catch (AutoCopyException error) { Need(error.Message == "AUTO_COPY_NO_CLIPBOARD", "only post-copy sequence changes count"); }
+                    baseline = OutputBufferCapture.ClipboardSequence;
                     Chord(form.Handle, VirtualC);
                     Need(Pump(ClipboardWaitMilliseconds, () => OutputBufferCapture.ClipboardSequence != baseline),
                         "live Ctrl+C changed the clipboard sequence");
@@ -757,9 +967,28 @@ namespace RemoteMonitorSlave
                         return copied != null;
                     });
                     Need(copied == Sample, "live Ctrl+A/Ctrl+C copied the exact control text");
+                    for (int repeat = 0; repeat < 2; repeat++)
+                    {
+                        Pump(System.Windows.Forms.SystemInformation.DoubleClickTime + 1, () => false);
+                        Need(GetForegroundWindow() == form.Handle && RootOf(WindowFromPhysicalPoint(target)) == form.Handle,
+                            "live cleanup still targets the owned text box");
+                        ClickOnce(form.Handle, GetSystemMetrics(SwapButtonMetric) != 0);
+                        Need(Pump(SettleMilliseconds, () => box.SelectionLength == 0), "cleanup click removed selection");
+                        Need(box.Text == Sample && System.Windows.Forms.Clipboard.GetText() == Sample,
+                            "cleanup changed neither source text nor clipboard");
+                        if (repeat == 0)
+                        {
+                            baseline = OutputBufferCapture.ClipboardSequence;
+                            Chord(form.Handle, VirtualA);
+                            Pump(ChordGapMilliseconds, () => false);
+                            Chord(form.Handle, VirtualC);
+                            Need(Pump(ClipboardWaitMilliseconds, () => OutputBufferCapture.ClipboardSequence != baseline) &&
+                                System.Windows.Forms.Clipboard.GetText() == Sample, "second copy after cleanup remains exact");
+                        }
+                    }
                 }
                 finally { if (savedCursor) { try { SetPhysicalCursorPos(saved.X, saved.Y); } catch { } } }
-                return "PASS: live input test (click + Ctrl+A + Ctrl+C)";
+                return "PASS: live input test (click + Ctrl+A + Ctrl+C + deselect; repeated copy exact)";
             }
             finally
             {

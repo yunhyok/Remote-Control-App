@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Pre-release tag to publish from this commit, e.g. v0.1.50-rc1'
+        description: 'New pre-release tag matching the source version, e.g. v0.1.58-rc1'
         required: true
         type: string
 
@@ -31,7 +31,7 @@ jobs:
         run: Get-ChildItem dist\verification-*\*.log -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "=== $($_.Name) ==="; Get-Content $_.FullName }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Remote-Monitor-v0.1.50-win7-win11-net48
+          name: Remote-Monitor-v0.1.58-win7-win11-net48
           path: |
             dist/*.zip
             dist/SHA256SUMS.txt
@@ -59,14 +59,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          $zips = Get-ChildItem dist\*.zip
+          $ErrorActionPreference = 'Stop'
+          $version = ([xml](Get-Content src\RemoteMonitorSlave\RemoteMonitorSlave.csproj -Raw)).Project.PropertyGroup.Version
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_TAG -cnotmatch ('^v' + [regex]::Escape($version) + '-rc[1-9][0-9]*$')) {
+            throw 'release_tag must be a new rc tag matching the source version.'
+          }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:GITHUB_SHA) { throw 'Checkout does not match the workflow commit.' }
+          $existingTag = git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify remote tags.' }
+          if ($existingTag) { throw 'Release tag already exists. Choose a new rc number; assets are never overwritten.' }
+          try {
+            $null = Invoke-RestMethod -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+            throw 'Release already exists. Choose a new rc number; assets are never overwritten.'
+          } catch [System.Net.WebException] {
+            if ($null -eq $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne 404) { throw }
+          }
+          $zips = @(
+            Get-Item -LiteralPath "dist\Remote-Monitor-v$version-win7-win11-net48.zip"
+            Get-Item -LiteralPath "dist\Remote-Monitor-Slave-v$version-win11-net48.zip"
+          )
           $sums = $zips | ForEach-Object { "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)  $($_.Name)" }
           Set-Content -LiteralPath dist\SHA256SUMS.txt -Value $sums -Encoding ASCII
           $files = @($zips | ForEach-Object { $_.FullName }) + (Resolve-Path dist\SHA256SUMS.txt).Path
-          cmd /c "gh release view $env:RELEASE_TAG >nul 2>&1"
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:RELEASE_TAG @files --clobber
-          } else {
-            gh release create $env:RELEASE_TAG --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Use Remote-Monitor-Slave-*.zip for the current Slave field test; the full ZIP also contains the Win7 Master. See HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
-          }
+          # Creating the ref is atomic: another run cannot substitute an existing tag's commit.
+          gh api --method POST "repos/$env:GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$env:RELEASE_TAG" -f "sha=$env:GITHUB_SHA" --silent
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to create a new release tag at the workflow commit.' }
+          gh release create $env:RELEASE_TAG --verify-tag --prerelease --target $env:GITHUB_SHA --title "Remote Monitor $env:RELEASE_TAG" --notes "Pre-release build from commit $env:GITHUB_SHA. Use Remote-Monitor-Slave-*.zip for the current Slave field test; the full ZIP also contains the Win7 Master. See HANDOFF.md and SLAVE-TEST.md. SHA256SUMS.txt lists package hashes." @files
           if ($LASTEXITCODE -ne 0) { throw 'gh release publish failed.' }

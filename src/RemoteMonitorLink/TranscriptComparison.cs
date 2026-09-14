@@ -15,9 +15,9 @@ namespace RemoteMonitorLink
     //   Summary()       — "T1|lines|exact|normalized|near|missing|empty|order" metadata only, safe for the log.
     //   SelfTest()      — called from LinkSelfTest.Run().
     // Line.MatchedIndex is the 0-based index into the FULL text's lines (not into the tail window), or -1.
-    // Matching is deterministic: first exact line wins, then the first whitespace-normalized line, then the
-    // nearest line by Levenshtein distance (lowest index on a tie). Repeated log lines therefore match their
-    // first occurrence, which keeps OrderPreserved non-decreasing rather than reporting a false reordering.
+    // Matching prefers exact, then whitespace-normalized, then nearest lines. Equal candidates after the
+    // previous match win before earlier unused candidates, and each source occurrence can be consumed once.
+    // ponytail: greedy occurrence alignment; use sequence alignment if ambiguous near-matching repeats require it.
     internal sealed class TranscriptComparison
     {
         internal const int MaxTranscriptLines = 2000;
@@ -56,13 +56,15 @@ namespace RemoteMonitorLink
             int start = full.Length > window ? full.Length - window : 0;
             int count = full.Length - start;
             var normalizedFull = new string[count];
+            var used = new bool[count];
             for (int i = 0; i < count; i++) normalizedFull[i] = Normalize(full[start + i]);
             string[] spoken = SplitLines(transcript);
             int limit = spoken.Length > MaxTranscriptLines ? MaxTranscriptLines : spoken.Length;
             int previous = -1;
             for (int i = 0; i < limit; i++)
             {
-                Line line = MatchLine(full, normalizedFull, start, count, spoken[i]);
+                int next = previous < start ? 0 : previous - start + 1;
+                Line line = MatchLine(full, normalizedFull, used, start, count, next, spoken[i]);
                 result.lines.Add(line);
                 switch (line.Status)
                 {
@@ -73,34 +75,46 @@ namespace RemoteMonitorLink
                     default: result.Missing++; break;
                 }
                 if (line.MatchedIndex < 0) continue;
+                used[line.MatchedIndex - start] = true;
                 if (line.MatchedIndex < previous) result.OrderPreserved = false;
                 previous = line.MatchedIndex;
             }
             return result;
         }
 
-        private static Line MatchLine(string[] full, string[] normalizedFull, int start, int count, string text)
+        private static Line MatchLine(string[] full, string[] normalizedFull, bool[] used,
+            int start, int count, int next, string text)
         {
             var line = new Line { Transcript = text, Status = "MISSING", MatchedIndex = -1, Distance = -1 };
             if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(Normalize(text)))
             { line.Status = "EMPTY"; line.Distance = 0; return line; }
-            for (int i = 0; i < count; i++)
+            for (int offset = 0; offset < count; offset++)
+            {
+                int i = (next + offset) % count;
+                if (used[i]) continue;
                 if (string.Equals(full[start + i], text, StringComparison.Ordinal))
                 {
                     line.Status = "EXACT"; line.MatchedIndex = start + i; line.Matched = full[start + i]; line.Distance = 0;
                     return line;
                 }
+            }
             string normalized = Normalize(text);
-            for (int i = 0; i < count; i++)
+            for (int offset = 0; offset < count; offset++)
+            {
+                int i = (next + offset) % count;
+                if (used[i]) continue;
                 if (string.Equals(normalizedFull[i], normalized, StringComparison.Ordinal))
                 {
                     line.Status = "NORMALIZED"; line.MatchedIndex = start + i; line.Matched = full[start + i]; line.Distance = 0;
                     return line;
                 }
+            }
             int threshold = Math.Max(2, normalized.Length / 10);
             int best = int.MaxValue, bestIndex = -1;
-            for (int i = 0; i < count; i++)
+            for (int offset = 0; offset < count; offset++)
             {
+                int i = (next + offset) % count;
+                if (used[i]) continue;
                 string candidate = normalizedFull[i];
                 if (candidate.Length == 0) continue;
                 if (Math.Abs(candidate.Length - normalized.Length) > threshold) continue;
@@ -204,9 +218,12 @@ namespace RemoteMonitorLink
             var text = new StringBuilder();
             text.Append("전사본 ").Append(Number(lines.Count)).Append("행 대조 — 일치 ").Append(Number(Exact))
                 .Append(" / 정규화 일치 ").Append(Number(Normalized)).Append(" / 근사 ").Append(Number(Near))
-                .Append(" / 누락 ").Append(Number(Missing)).Append(" / 빈 줄 ").Append(Number(Empty))
+                .Append(" / 원문 대응 없음 ").Append(Number(Missing)).Append(" / 빈 줄 ").Append(Number(Empty))
                 .Append(OrderPreserved ? " / 순서 유지" : " / 순서 어긋남").Append("\r\n");
             text.Append("[원본 Output 텍스트 포함 — 로그에 남기지 말고 화면/진단 번들에서만 확인]\r\n");
+            text.Append("'원문 대응 없음'은 대응 원문 행을 찾지 못한 전사 행 수입니다. 동일 원문 행은 한 번만 대응합니다.\r\n")
+                .Append("전체 줄·최신 줄 전사 여부: 미검증 — 실제 OCR 입력 이미지의 마지막 줄과 전사본을 비교하세요.\r\n")
+                .Append("전사하지 않은 원문 행의 누락률이나 OCR 정확도는 계산하지 않습니다. 복사/캡처 시각 차이도 확인하세요.\r\n");
             for (int i = 0; i < lines.Count; i++)
             {
                 Line line = lines[i];
@@ -232,7 +249,7 @@ namespace RemoteMonitorLink
                 case "NORMALIZED": return "정규화 일치";
                 case "NEAR": return "근사";
                 case "EMPTY": return "빈 줄";
-                default: return "누락";
+                default: return "원문 대응 없음";
             }
         }
 
@@ -259,7 +276,7 @@ namespace RemoteMonitorLink
             Check(mixed.Summary().IndexOf("alpha", StringComparison.Ordinal) < 0 &&
                 mixed.Summary().IndexOf("line", StringComparison.Ordinal) < 0, "summary never carries compared text");
             string report = mixed.Render();
-            Check(report.Contains("alpha line one") && report.Contains("beta  line two") && report.Contains("누락") &&
+            Check(report.Contains("alpha line one") && report.Contains("beta  line two") && report.Contains("원문 대응 없음 1") &&
                 report.Contains("순서 유지"), "rendered report keeps the per-line text for the bundle");
 
             var reordered = Compare(full, "GAMMA line three\nalpha line one");
@@ -268,8 +285,30 @@ namespace RemoteMonitorLink
             var ordered = Compare(full, "alpha line one\nGAMMA line three");
             Check(ordered.OrderPreserved && ordered.Lines[1].MatchedIndex == 2, "increasing matched indexes keep the order flag");
             var repeated = Compare("same log\nsame log", "same log\nsame log");
-            Check(repeated.Exact == 2 && repeated.Lines[1].MatchedIndex == 0 && repeated.OrderPreserved,
-                "repeated lines match the first occurrence without breaking the order flag");
+            Check(repeated.Exact == 2 && repeated.Lines[0].MatchedIndex == 0 && repeated.Lines[1].MatchedIndex == 1 &&
+                repeated.OrderPreserved, "repeated lines consume distinct occurrences in order");
+            var suffix = Compare("A\nB\nA\nC", "B\nA\nC");
+            Check(suffix.Exact == 3 && suffix.OrderPreserved && suffix.Lines[0].MatchedIndex == 1 &&
+                suffix.Lines[1].MatchedIndex == 2 && suffix.Lines[2].MatchedIndex == 3,
+                "a repeated line uses its later occurrence in an ordered suffix");
+            var duplicate = Compare("A", "A\nA");
+            Check(duplicate.Exact == 1 && duplicate.Missing == 1 && duplicate.Lines[1].MatchedIndex == -1,
+                "an extra transcript occurrence cannot reuse the only source line");
+            var mixedDuplicate = Compare("value = 38.000 MHz",
+                "value = 38.000 MHz\n value = 38.000 MHz \nvalue = 38.001 MHz");
+            Check(mixedDuplicate.Exact == 1 && mixedDuplicate.Missing == 2,
+                "normalized and near matches cannot reuse a consumed source line");
+            var normalizedRepeated = Compare("same  log\nsame  log", " same log \n same log ");
+            Check(normalizedRepeated.Normalized == 2 && normalizedRepeated.Lines[1].MatchedIndex == 1 &&
+                normalizedRepeated.OrderPreserved, "normalized repeats consume sequential occurrences");
+            var nearRepeated = Compare("Simulation resumed.\nSimulation resumed.", "Simulation resumed\nSimulation resumed");
+            Check(nearRepeated.Near == 2 && nearRepeated.Lines[1].MatchedIndex == 1 && nearRepeated.OrderPreserved,
+                "equidistant near repeats consume sequential occurrences");
+            var omitted = Compare("A\nB\nC", "A");
+            Check(omitted.Exact == 1 && omitted.Missing == 0 && omitted.Summary() == "T1|1|1|0|0|0|0|1" &&
+                omitted.Render().Contains("원문 대응 없음 0") && omitted.Render().Contains("전체 줄·최신 줄 전사 여부: 미검증") &&
+                omitted.Render().Contains("OCR 정확도는 계산하지 않습니다") && !omitted.Render().Contains(" / 누락 "),
+                "a matching partial transcript keeps the T1 contract without claiming complete OCR coverage");
 
             var empty = Compare(null, null);
             Check(empty.Lines.Count == 0 && empty.OrderPreserved && empty.Summary() == "T1|0|0|0|0|0|0|1" &&
@@ -288,8 +327,8 @@ namespace RemoteMonitorLink
             var many = new StringBuilder();
             for (int i = 0; i < MaxTranscriptLines + 100; i++) many.Append("zz\n");
             var capped = Compare("zz", many.ToString());
-            Check(capped.Lines.Count == MaxTranscriptLines && capped.Exact == MaxTranscriptLines,
-                "transcript line count is capped");
+            Check(capped.Lines.Count == MaxTranscriptLines && capped.Exact == 1 && capped.Missing == MaxTranscriptLines - 1,
+                "transcript line count is capped without reusing the source occurrence");
 
             var padded = Compare("value = 38.000 MHz", "   value   =   38.000   MHz   ");
             Check(padded.Normalized == 1 && padded.Lines[0].Distance == 0, "collapsed whitespace runs still match");

@@ -24,18 +24,33 @@ namespace RemoteMonitorSlave
         private readonly Button export = new Button { Text = "연결파일 저장" };
         private readonly Button refresh = new Button { Text = "현재 목록 새로고침" };
         private readonly Button powerSiCheck = new Button { Text = "PowerSI 확인" };
-        private readonly Button outputAll = new Button { Text = "두 방식 비교" };
-        private readonly Button replayVision = new Button { Text = "같은 화면 재판독" };
+        private readonly Button outputAll = new Button { Text = "새 화면 두 방식 비교" };
+        private readonly Button replayVision = new Button { Text = "저장 화면 재판독" };
         private readonly Button visionSetup = new Button { Text = "LM Studio 설정" };
         private readonly Button visionPreview = new Button { Text = "캡처 / 판독 원문 보기" };
+        private readonly ComboBox outputTargets = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        // One batch, separate evidence per process. Never compare one instance's OCR with another's buffer.
+        private sealed class OutputSample
+        {
+            internal ProcessState Process;
+            internal int SessionId;
+            internal OutputBufferResult Buffer;
+            internal DateTime ReceivedUtc;
+            internal PowerSiObservation Vision;
+            internal readonly List<PowerSiObservation> Runs = new List<PowerSiObservation>();
+            internal byte[] FailureFrame;
+            internal string Failure;
+            public override string ToString() { return "PID " + Process.Pid + " / " + (Buffer?.Code ?? "대기") + " / OCR " +
+                (Vision?.LocalVisibleEmpty == true ? "보이는 내용 없음" : Vision?.LocalFailure != null ? "실패 (상세 확인)" : Vision?.Code ?? "없음"); }
+        }
+        private readonly List<OutputSample> outputSamples = new List<OutputSample>();
+        private OutputSample selectedSample;
+        private bool batchInProgress;
         private LocalVisionSettings visionSettings = new LocalVisionSettings();
         private PowerSiObservation lastObservation;
         private readonly List<PowerSiObservation> comparisonRuns = new List<PowerSiObservation>();
         private OutputBufferResult lastBuffer;
         private DateTime lastBufferReceivedUtc;
-        // Learned Output click position. Memory only: never written to disk, never sent anywhere, dropped on exit.
-        private OutputAnchor learnedAnchor;   // Confirmed on a captured frame; the only anchor auto copy may use.
-        private OutputAnchor pendingAnchor;   // Sampled during a manual copy but not confirmed on a frame.
         private string lastAutoCopyCode;      // Outcome code of the most recent auto-copy attempt, for the status line.
         // The worker capture of the most recent FAILED auto copy (memory only, last one kept) and its code/detail.
         // It is what explains an abort, so it stays available for the diagnostic bundle until a newer failure.
@@ -88,8 +103,8 @@ namespace RemoteMonitorSlave
             try { visionSettings = VisionSettingsStore.Load(Path.Combine(dataPath, "local-vision.json")); }
             catch { log.Write("VISION_SETTINGS_INVALID"); }
             Controls.Add(new Label { Text = Text, Font = new Font(Font, FontStyle.Bold), Bounds = new Rectangle(18, 16, 804, 28) });
-            Controls.Add(new Label { Text = "이번 확인: 두 방식 비교 한 번으로 Output 영역 찾기 → 크롭 판독 + 전체 텍스트 수집을 실행합니다.\r\n" +
-                "Master·메신저 준비는 필요 없습니다. 진행률·완료를 추정하거나 시뮬레이션을 조작하지 않습니다.",
+            Controls.Add(new Label { Text = "새 화면 두 방식 비교: 실행 중인 모든 PowerSI를 순서대로 자동 수집합니다. 최초 수동 복사는 없습니다.\r\n" +
+                "모델 변경 후: 같은 OCR 이미지 재판독으로 저장한 입력만 다시 읽습니다. (OCR 입력이 없으면 영역 찾기부터)",
                 Bounds = new Rectangle(18, 52, 804, 56) });
             address.SetBounds(18, 120, 246, 28);
             foreach (var ip in NetworkInterface.GetAllNetworkInterfaces().Where(nic => nic.OperationalStatus == OperationalStatus.Up)
@@ -107,9 +122,8 @@ namespace RemoteMonitorSlave
             state.SetBounds(18, 164, 804, 48);
             ShowActivity("STOPPED — 두 방식 비교 한 번: LLM 화면 판독 + 전체 텍스트 수집 / Master 재시험 없음");
             outputAll.SetBounds(18, 218, 150, 32);
-            outputAll.AccessibleName = "LLM 화면 판독과 Output 전체 텍스트 수집을 함께 실행하여 비교";
+            outputAll.AccessibleName = "새 PowerSI 화면 캡처와 Output 전체 텍스트 수집을 함께 실행하여 비교";
             replayVision.SetBounds(180, 218, 150, 32);
-            replayVision.AccessibleName = "저장한 동일 화면과 전체 텍스트를 유지하고 현재 LM Studio 모델로 재판독";
             pairing.SetBounds(342, 222, 480, 26);
             pairing.AccessibleName = "인증 연결 코드 (숨김)";
             snapshot.SetBounds(180, 254, 642, 56);
@@ -131,7 +145,9 @@ namespace RemoteMonitorSlave
             processes.Columns[5].Width = 160;
             foreach (DataGridViewColumn column in processes.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
             processes.SelectionChanged += delegate { if (processes.SelectedRows.Count != 0) processes.ClearSelection(); };
-            var powerSiCaption = new Label { Text = "PowerSI Output — 수집 출처 / 원문 미리보기", Bounds = new Rectangle(18, 522, 400, 28) };
+            outputTargets.SetBounds(18, 522, 400, 28);
+            outputTargets.AccessibleName = "PowerSI 인스턴스별 Output 결과 선택 (PID)";
+            outputTargets.SelectedIndexChanged += delegate { SelectOutputSample(outputTargets.SelectedItem as OutputSample); };
             visionSetup.SetBounds(426, 517, 156, 32);
             visionPreview.SetBounds(594, 517, 228, 32); visionPreview.Enabled = false;
             powerSi.SetBounds(18, 554, 804, 114);
@@ -139,8 +155,8 @@ namespace RemoteMonitorSlave
             var path = new TextBox { Text = log.Path, ReadOnly = true, Bounds = new Rectangle(18, 682, 650, 25) };
             var folder = new Button { Text = "Open Log Folder", Bounds = new Rectangle(680, 678, 142, 32) };
             anchorState.SetBounds(18, 764, 804, 40);
-            anchorState.AccessibleName = "학습한 Output 자동 복사 위치 상태";
-            Controls.AddRange(new Control[] { address, start, stop, export, powerSiCheck, outputAll, replayVision, refresh, state, pairing, snapshot, processes, powerSiCaption, powerSi, path, folder, visionSetup, visionPreview, anchorState });
+            anchorState.AccessibleName = "자동 Output 탐색·복사 및 Windows 응답 상태";
+            Controls.AddRange(new Control[] { address, start, stop, export, powerSiCheck, outputAll, replayVision, refresh, state, pairing, snapshot, processes, outputTargets, powerSi, path, folder, visionSetup, visionPreview, anchorState });
             Controls.Add(new Label { Text = "화면·LLM 판독 원문은 Slave 내부에서만 사용하고 고정된 텍스트 상태/수치만 전송합니다. 판독 요청은 한 번씩 처리하며 Stop으로 취소할 수 있습니다. 로그는 앱을 종료하지 않고 첨부 가능합니다.",
                 Bounds = new Rectangle(18, 720, 804, 42) });
             start.Click += async delegate { await StartServer(); };
@@ -166,7 +182,7 @@ namespace RemoteMonitorSlave
 
         private async Task StartServer()
         {
-            if (busy || closing || server != null || snapshotCancellation != null || address.SelectedIndex < 0) return;
+            if (busy || batchInProgress || closing || server != null || snapshotCancellation != null || address.SelectedIndex < 0) return;
             var bind = IPAddress.Parse((string)address.SelectedItem);
             busy = true;
             UpdateButtons();
@@ -218,7 +234,7 @@ namespace RemoteMonitorSlave
         private void StopServer()
         {
             remoteProgress.Stop(); remoteClock = null;
-            bool preserveComparison = replayInProgress && lastBuffer != null && lastObservation?.LocalFrame != null;
+            bool preserveComparison = batchInProgress || (replayInProgress && lastBuffer != null && lastObservation?.LocalFrame != null);
             CancelSnapshotRefresh();
             replayInProgress = false;
             var oldServer = server;
@@ -235,7 +251,7 @@ namespace RemoteMonitorSlave
             pairingText = null;
             pairing.Clear();
             if (!preserveComparison) ClearPowerSi();
-            ShowActivity(preserveComparison ? "STOPPED — 재판독 취소. 마지막 완료 결과를 유지했습니다. 같은 화면으로 다시 판독할 수 있습니다." :
+            ShowActivity(batchInProgress ? "STOPPING — 입력 작업 정리 중. 완료된 PID 결과는 유지합니다." : preserveComparison ? "STOPPED — 재판독 취소. 마지막 완료 결과를 유지했습니다. 같은 화면으로 다시 판독할 수 있습니다." :
                 "STOPPED — 수신을 중지했습니다. 로그를 확인하거나 첨부할 수 있습니다.");
             try { log.Write(oldServer == null ? "UI_STOP" : "LISTEN_STOPPED"); } catch { }
             UpdateButtons();
@@ -446,72 +462,15 @@ namespace RemoteMonitorSlave
 
         // ---------------------------------------------------------------- learned Output position (auto copy)
 
-        // The stored anchor is usable only while the very same PowerSI instance is still running in this session.
-        private OutputAnchor MatchingAnchor(ProcessInventory inventory)
-        {
-            var anchor = learnedAnchor;
-            if (anchor == null || inventory == null || inventory.Items == null || inventory.SessionId != anchor.SessionId) return null;
-            foreach (var item in inventory.Items)
-                if (item.Pid == anchor.Pid && item.StartUtcTicks.HasValue && item.StartUtcTicks.Value == anchor.StartUtcTicks)
-                    return anchor;
-            return null;
-        }
-
-        private static bool SameInstance(OutputAnchor left, OutputAnchor right)
-        {
-            return left != null && right != null && left.Pid == right.Pid &&
-                left.StartUtcTicks == right.StartUtcTicks && left.SessionId == right.SessionId;
-        }
-
-        // A manual copy only tells us where the pointer was. The anchor becomes usable when the same run's frame
-        // shows a single Output body around that point; otherwise it stays unconfirmed and auto copy stays off.
-        private void LearnOutputAnchor(OutputAnchor sampled, PowerSiObservation vision)
-        {
-            if (sampled == null) return;
-            string reason = "BODY";
-            string diagnostics = "NONE";
-            var frame = vision == null ? null : vision.LocalFrame;
-            if (frame == null) reason = "FRAME_MISSING";
-            else if (frame.PixelSize != sampled.ClientSize) reason = "SIZE_MISMATCH";
-            else
-            {
-                try
-                {
-                    BodySearchDiagnostics search;
-                    var body = OutputPaneImage.FindBodyAt(frame, sampled.ClientPoint, CancellationToken.None, out search);
-                    diagnostics = search == null ? "NONE" : search.Summary();
-                    sampled.Body = body; // The worker clicks this body's centre and re-verifies it after the click.
-                    learnedAnchor = sampled;
-                    pendingAnchor = null;
-                    try { log.Write("OUTPUT_ANCHOR_LEARNED", "anchor=" + sampled.Serialize() + " body=" + BoxText(body) + " diag=" + LogValue(diagnostics)); }
-                    catch { }
-                    UpdateAnchorState();
-                    return;
-                }
-                catch (LocalVisionException error) { reason = "BODY"; diagnostics = error.Detail ?? "NONE"; }
-                catch { reason = "BODY"; }
-            }
-            if (!SameInstance(learnedAnchor, sampled)) learnedAnchor = null; // A previous instance's position is never reused.
-            pendingAnchor = sampled;
-            try { log.Write("OUTPUT_ANCHOR_UNCONFIRMED", "reason=" + reason + " diag=" + LogValue(diagnostics)); } catch { }
-            UpdateAnchorState();
-        }
-
-        private string AnchorStateText()
-        {
-            return learnedAnchor != null ? "학습됨" : pendingAnchor != null ? "미확인" : "없음";
-        }
-
         private void UpdateAnchorState()
         {
-            anchorState.Text = "자동 복사 위치: " + AnchorStateText() + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
+            anchorState.Text = "자동 복사: 매번 Output 영역 확인 / 최근 결과: " + (lastAutoCopyCode ?? "없음") +
                 " / 자동 복사 설정: " + (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + Environment.NewLine +
-                "수동 복사 한 번으로 위치를 배우고 같은 실행의 화면에서 다시 확인합니다. 자동 복사 동안 이 창은 잠시 최소화되며 위치는 메모리에만 둡니다.";
+                "PowerSI 크기 변경 없음. 응답 없음(PENDING)은 입력 없이 건너뜁니다. 내부 시뮬레이션 pending 판별은 미구현입니다.";
         }
 
-        // The Slave's own window can sit over the PowerSI Output pane; the worker's hit test would then abort with
-        // AUTO_COPY_OCCLUDED (the 2026-09-11 field result). Minimize ourselves and every open owned dialog while the
-        // worker runs, and put every window back afterwards, whatever the outcome.
+        // Called only AFTER the exact PowerSI window has been validated and activated. Never expose an
+        // unrelated background app merely because preparation failed. Only our own forms change state.
         private List<KeyValuePair<Form, FormWindowState>> MinimizeForAutoCopy()
         {
             var hidden = new List<KeyValuePair<Form, FormWindowState>>();
@@ -537,12 +496,6 @@ namespace RemoteMonitorSlave
             }
         }
 
-        private static string BoxText(Rectangle box)
-        {
-            return box.X.ToString(CultureInfo.InvariantCulture) + "|" + box.Y.ToString(CultureInfo.InvariantCulture) + "|" +
-                box.Width.ToString(CultureInfo.InvariantCulture) + "|" + box.Height.ToString(CultureInfo.InvariantCulture);
-        }
-
         // Log values stay fixed codes, integers and pipe-separated metadata; anything else becomes NONE.
         private static string LogValue(string text)
         {
@@ -566,6 +519,9 @@ namespace RemoteMonitorSlave
 
         private void ClearPowerSi()
         {
+            selectedSample = null;
+            outputSamples.Clear();
+            outputTargets.Items.Clear();
             comparisonReports.Clear();
             comparisonRuns.Clear();
             lastObservation = null;
@@ -576,159 +532,210 @@ namespace RemoteMonitorSlave
             UpdateButtons();
         }
 
+        private void SaveSelectedSample()
+        {
+            if (selectedSample == null) return;
+            selectedSample.Buffer = lastBuffer;
+            selectedSample.ReceivedUtc = lastBufferReceivedUtc;
+            selectedSample.Vision = lastObservation;
+            selectedSample.Runs.Clear();
+            selectedSample.Runs.AddRange(comparisonRuns);
+            selectedSample.FailureFrame = autoCopyFrame;
+            selectedSample.Failure = autoCopyFailure;
+        }
+
+        private void SelectOutputSample(OutputSample sample)
+        {
+            if (sample == null || ReferenceEquals(sample, selectedSample)) return;
+            SaveSelectedSample();
+            selectedSample = sample;
+            RenderOutputBuffer(sample.Buffer, sample.Vision, sample.ReceivedUtc);
+            comparisonRuns.Clear();
+            comparisonRuns.AddRange(sample.Runs);
+            autoCopyFrame = sample.FailureFrame;
+            autoCopyFailure = sample.Failure;
+            lastAutoCopyCode = sample.Buffer?.Code;
+            UpdateAnchorState();
+        }
+
+        private static void RecordTargetFailure(OutputSample sample, string code)
+        {
+            if (sample.Buffer?.Code == "OUTPUT_VISIBLE_EMPTY" && sample.Vision?.LocalVisibleEmpty == true) return;
+            // OCR failure is not a failed copy: keep the independently collected full buffer and its UTC.
+            if (sample.Buffer?.Text == null)
+                sample.Buffer = new OutputBufferResult { Code = code, Method = "NONE", Detail = "NONE" };
+            sample.Vision = sample.Vision ?? PowerSiObservation.VisionUnavailable("VISION_FAILED");
+            sample.Vision.LocalFailure = code;
+        }
+
+        private static bool RecordVisibleEmpty(OutputSample sample, PowerSiObservation observation)
+        {
+            if (observation?.LocalVisibleEmpty != true) return false;
+            sample.Vision = observation;
+            sample.Buffer = new OutputBufferResult { Code = "OUTPUT_VISIBLE_EMPTY", Method = "SCREEN",
+                Detail = "FULL_BUFFER_UNCONFIRMED" };
+            return true;
+        }
+
         private async Task ReadOutputBuffer()
         {
-            if (closing || busy || server != null || snapshotCancellation != null) return;
+            if (closing || busy || batchInProgress || server != null || snapshotCancellation != null) return;
             var cancellation = new CancellationTokenSource();
-            cancellation.CancelAfter(PowerSiVision.RequestDeadlineMilliseconds); // Allow the 100s vision deadline to return its crop/error before outer cancellation.
             snapshotCancellation = cancellation;
             ClearPowerSi();
-            uint clipboardBaseline = OutputBufferCapture.ClipboardSequence;
-            var clock = Stopwatch.StartNew();
-            ShowActivity("LLM 화면 판독 + Output 전체 텍스트 수집 시작 / Stop 가능");
+            batchInProgress = true;
             UpdateButtons();
-            Task<PowerSiObservation> visionTask = null;
-            string visionStage = "캡처 준비";
-            var visionProgress = new Progress<string>(stage =>
-            {
-                if (!ReferenceEquals(snapshotCancellation, cancellation) || closing || cancellation.IsCancellationRequested) return;
-                visionStage = stage == "LOCATE_OUTPUT" ? "1/2 Output 영역 찾기" :
-                    stage == "CROP_OUTPUT" ? "원본 픽셀 크롭" : stage == "READ_CROP" ? "2/2 크롭 문자 그대로 전사" : "PowerSI 캡처";
-                try { log.Write("OUTPUT_VISION_" + stage); } catch { }
-            });
+            var clock = Stopwatch.StartNew();
             try
             {
-                log.Write("OUTPUT_BUFFER_BEGIN");
-                var inventory = await Task.Run(() => ProcessInventory.CaptureAsync(cancellation.Token, true));
-                visionTask = PowerSiVision.CaptureAsync(inventory, visionSettings, cancellation.Token, visionProgress);
-                var result = await OutputBufferCapture.ReadAsync(inventory, cancellation.Token);
-                var bufferReceivedUtc = DateTime.UtcNow;
+                log.Write("OUTPUT_BATCH_BEGIN");
+                var inventory = await ProcessInventory.CaptureAsync(cancellation.Token, true);
                 cancellation.Token.ThrowIfCancellationRequested();
-                if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                RenderSnapshot(inventory, DateTime.Now, "로컬 Output 전체 읽기");
-                log.WriteOutputBuffer(result);
-                if (result.Text == null && result.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
-                    result.Code != "BUFFER_TIMEOUT" && result.Code != "BUFFER_SIZE" && result.Code != "BUFFER_TOO_LARGE" && result.Code != "BUFFER_WORKER_FAILED")
+                inventory.Validate();
+                RenderSnapshot(inventory, DateTime.Now, "PowerSI 전체 인스턴스 수집");
+                foreach (var process in inventory.Items.OrderBy(item => item.Pid))
+                    outputSamples.Add(new OutputSample { Process = process, SessionId = inventory.SessionId,
+                        Buffer = new OutputBufferResult { Code = "NOT_ATTEMPTED", Method = "NONE", Detail = "NONE" },
+                        ReceivedUtc = DateTime.UtcNow, Vision = PowerSiObservation.VisionUnavailable("OUTPUT_UNAVAILABLE") });
+                for (int index = 0; index < outputSamples.Count; index++)
                 {
-                    // The only input path in this app: one re-verified click plus Ctrl+A/Ctrl+C at a learned position.
-                    var anchor = visionSettings.AutoCopyEnabled ? MatchingAnchor(inventory) : null;
-                    if (anchor != null)
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    var sample = outputSamples[index];
+                    string prefix = (index + 1) + "/" + outputSamples.Count + " · PID " + sample.Process.Pid;
+                    var target = new ProcessInventory { SessionId = sample.SessionId, Items = new[] { sample.Process } };
+                    using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token))
                     {
-                        log.Write("OUTPUT_AUTO_COPY_BEGIN", "self_hidden=1");
-                        ShowActivity("학습한 Output 위치로 자동 복사 중 — 이 창을 잠시 최소화합니다. 마우스·키보드를 건드리지 마세요 (최대8초) / Stop 가능");
-                        OutputBufferResult automatic;
-                        var hidden = MinimizeForAutoCopy();
+                        // Separate per-instance budget; a failed/slow window never consumes its sibling's allowance.
+                        deadline.CancelAfter(215000);
+                        var progress = new Progress<string>(stage =>
+                        {
+                            if (closing || cancellation.IsCancellationRequested || !ReferenceEquals(snapshotCancellation, cancellation)) return;
+                            ShowActivity(prefix + " / " + stage + " / Stop 가능 (창당 최대215초)");
+                        });
+                        var targetClock = Stopwatch.StartNew();
                         try
                         {
-                            await Task.Delay(300, cancellation.Token); // Let the minimize reach the desktop before the hit test.
-                            automatic = await OutputAutoCopy.AutoCopyAsync(inventory, anchor, clipboardBaseline, cancellation.Token);
-                        }
-                        finally { RestoreAfterAutoCopy(hidden); }
-                        cancellation.Token.ThrowIfCancellationRequested();
-                        if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                        lastAutoCopyCode = automatic.Code;
-                        if (automatic.Code == "AUTO_COPY_READ" && automatic.Text != null)
-                        {
-                            result = automatic;
-                            bufferReceivedUtc = DateTime.UtcNow;
-                            log.WriteOutputBuffer(result);
-                        }
-                        else
-                        {
-                            log.Write("OUTPUT_AUTO_COPY_FAILED", "code=" + LogValue(automatic.Code) + " detail=" + LogValue(automatic.Detail));
-                            // Keep the worker's own capture of the abort (last one only) for the diagnostic bundle.
-                            var abortedFrame = OutputAutoCopy.FrameOf(automatic);
-                            if (abortedFrame != null)
+                            sample.Vision = null;
+                            log.Write("OUTPUT_TARGET_BEGIN", "pid=" + sample.Process.Pid + " start=" + (sample.Process.StartUtcTicks ?? 0));
+                            ShowActivity(prefix + " / 창 확인 → Output 위치 찾기 → 자동 복사 → OCR");
+                            PowerSiFrame frame;
+                            PowerSiObservation located = null;
+                            bool autoCopy = visionSettings.Enabled && visionSettings.AutoCopyEnabled;
+                            List<KeyValuePair<Form, FormWindowState>> hidden = null;
+                            try
                             {
-                                autoCopyFrame = abortedFrame;
-                                autoCopyFailure = automatic.Code + " " + automatic.Detail;
+                                frame = autoCopy
+                                    ? await PowerSiScreenCapture.PrepareAsync(target, deadline.Token,
+                                        detail => log.Write("OUTPUT_PREPARE", "pid=" + sample.Process.Pid + " " + detail))
+                                    : await PowerSiScreenCapture.CaptureAsync(target, deadline.Token);
+                                if (autoCopy)
+                                {
+                                    hidden = MinimizeForAutoCopy();
+                                    await Task.Delay(300, deadline.Token);
+                                }
+                                sample.Buffer = await OutputBufferCapture.ReadAsync(target, deadline.Token);
+                                sample.ReceivedUtc = DateTime.UtcNow;
+                                // A timed-out text provider is not permission to try input against the same application.
+                                bool copyAllowed = sample.Buffer.Text == null &&
+                                    sample.Buffer.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
+                                    sample.Buffer.Code != "BUFFER_TIMEOUT" && sample.Buffer.Code != "BUFFER_WORKER_FAILED" &&
+                                    sample.Buffer.Code != "BUFFER_SIZE" && sample.Buffer.Code != "BUFFER_TOO_LARGE";
+                                if (copyAllowed && autoCopy)
+                                {
+                                    located = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame, null, true);
+                                    sample.Runs.Add(located);
+                                    log.WritePowerSi(located);
+                                    sample.Vision = located; // Preserve the locator frame/diagnostics even when no click is allowed.
+                                    var anchor = OutputAutoCopy.AnchorFromVision(target, located);
+                                    if (RecordVisibleEmpty(sample, located)) { /* No input or OCR for a visibly empty pane. */ }
+                                    else if (anchor != null)
+                                    {
+                                        log.Write("OUTPUT_AUTO_COPY_BEGIN", "pid=" + sample.Process.Pid + " self_hidden=1");
+                                        sample.Buffer = await OutputAutoCopy.AutoCopyAsync(target, anchor, deadline.Token);
+                                        sample.ReceivedUtc = DateTime.UtcNow;
+                                        if (sample.Buffer.Code == "AUTO_COPY_READ" && sample.Buffer.Text != null)
+                                        {
+                                            frame = OutputAutoCopy.CleanFrameOf(sample.Buffer);
+                                            located = PowerSiVision.ReframeOutput(located, frame);
+                                            sample.Vision = located;
+                                        }
+                                        else
+                                        {
+                                            sample.FailureFrame = OutputAutoCopy.FrameOf(sample.Buffer);
+                                            sample.Failure = sample.Buffer.Code + " " + sample.Buffer.Detail;
+                                            located = null;
+                                        }
+                                    }
+                                    else sample.Buffer = new OutputBufferResult { Code = "AUTO_COPY_REGION_UNCONFIRMED",
+                                        Method = "NONE", Detail = LogValue(located?.LocalFailure) };
+                                }
                             }
-                            // A failed attempt may still have changed the clipboard; the manual wait must not accept it.
-                            clipboardBaseline = OutputBufferCapture.ClipboardSequence;
+                            finally { RestoreAfterAutoCopy(hidden); }
+                            deadline.Token.ThrowIfCancellationRequested();
+                            // Nonresponsive or failed input targets receive no more operations. Their captured diagnostics remain.
+                            if (sample.Buffer.Code == "AUTO_COPY_READ")
+                                sample.Vision = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame, located);
+                            else if (sample.Buffer.Text != null || sample.Vision == null && !sample.Buffer.Code.StartsWith("SC_", StringComparison.Ordinal))
+                                sample.Vision = await PowerSiVision.CaptureAsync(target, visionSettings, deadline.Token, progress, frame);
+                            if (sample.Buffer.Text == null) RecordVisibleEmpty(sample, sample.Vision);
                         }
-                        UpdateAnchorState();
+                        catch (OperationCanceledException)
+                        {
+                            if (cancellation.IsCancellationRequested)
+                            {
+                                RecordTargetFailure(sample, "TARGET_CANCELLED");
+                                throw;
+                            }
+                            RecordTargetFailure(sample, "TARGET_TIMEOUT");
+                        }
+                        catch (Exception error)
+                        {
+                            RecordTargetFailure(sample, error is InvalidDataException ? LogValue(error.Message) : "TARGET_FAILED");
+                        }
+                        finally
+                        {
+                            sample.ReceivedUtc = sample.ReceivedUtc == default(DateTime) ? DateTime.UtcNow : sample.ReceivedUtc;
+                            if (sample.Vision == null) sample.Vision = PowerSiObservation.VisionUnavailable("OUTPUT_UNAVAILABLE");
+                            if (sample.Buffer.Code == "SC_PENDING")
+                                sample.Vision.LocalFailure = "PENDING_WINDOWS_NOT_RESPONDING_INPUT_STOPPED";
+                            if (!sample.Runs.Contains(sample.Vision)) sample.Runs.Add(sample.Vision);
+                            log.WriteOutputBuffer(sample.Buffer);
+                            log.WritePowerSi(sample.Vision);
+                            log.Write("OUTPUT_TARGET_END", "pid=" + sample.Process.Pid + " code=" + LogValue(sample.Buffer.Code) + " elapsed_ms=" + targetClock.ElapsedMilliseconds);
+                        }
                     }
                 }
-                if (result.Text == null && result.Code.StartsWith("BUFFER_", StringComparison.Ordinal) &&
-                    result.Code != "BUFFER_TIMEOUT" && result.Code != "BUFFER_SIZE" && result.Code != "BUFFER_TOO_LARGE" && result.Code != "BUFFER_WORKER_FAILED")
-                {
-                    // One guided same-run fallback; this path generates no input and does not change the clipboard.
-                    log.Write("OUTPUT_COPY_WAIT");
-                    var waiting = Stopwatch.StartNew();
-                    uint attemptedSequence = clipboardBaseline;
-                    int sequenceAttempts = 0;
-                    while (waiting.Elapsed.TotalSeconds < 30)
-                    {
-                        cancellation.Token.ThrowIfCancellationRequested();
-                        if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                        ShowActivity("자동 전체 읽기 미지원 — PowerSI Output 클릭 → Ctrl+A → Ctrl+C. 새 복사 대기 " +
-                            (30 - (int)waiting.Elapsed.TotalSeconds) + "초 / 원치 않으면 Stop");
-                        powerSi.Text = result.Code + " / " + result.Detail + "\r\n복사 성공 시 이 화면에 전체 글자·줄 수와 미리보기를 표시합니다.";
-                        uint currentSequence = OutputBufferCapture.ClipboardSequence;
-                        if (currentSequence != attemptedSequence)
-                        {
-                            attemptedSequence = currentSequence;
-                            sequenceAttempts = 0;
-                        }
-                        // Read-only retries allow a freshly copied value to finish rendering/close its clipboard lock.
-                        if (currentSequence != clipboardBaseline && sequenceAttempts < 3)
-                        {
-                            sequenceAttempts++;
-                            var copied = await OutputBufferCapture.ReadAsync(inventory, cancellation.Token, clipboardBaseline);
-                            cancellation.Token.ThrowIfCancellationRequested();
-                            if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                            if (copied.Code != "COPY_PENDING")
-                            {
-                                result = copied;
-                                bufferReceivedUtc = DateTime.UtcNow;
-                                log.WriteOutputBuffer(result);
-                                break;
-                            }
-                        }
-                        await Task.Delay(250, cancellation.Token);
-                    }
-                    if (result.Text == null) log.Write("OUTPUT_COPY_NOT_RECEIVED");
-                }
-                cancellation.Token.ThrowIfCancellationRequested();
-                if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                // Where the user clicked before copying manually. Only a hint until this run's frame confirms it.
-                var sampledAnchor = OutputAutoCopy.AnchorOf(result);
-                RenderOutputBuffer(result, null, bufferReceivedUtc);
-                while (!visionTask.IsCompleted)
-                {
-                    ShowActivity("텍스트 수집 " + result.Code + " / " + visionStage + " — " + (int)clock.Elapsed.TotalSeconds + "초 / 최대105초; Stop 가능");
-                    await Task.WhenAny(visionTask, Task.Delay(1000, cancellation.Token));
-                    cancellation.Token.ThrowIfCancellationRequested();
-                    if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                }
-                var vision = await visionTask;
-                cancellation.Token.ThrowIfCancellationRequested();
-                if (!ReferenceEquals(snapshotCancellation, cancellation) || closing) return;
-                RenderOutputBuffer(result, vision, bufferReceivedUtc);
-                LearnOutputAnchor(sampledAnchor, vision);
-                log.WritePowerSi(vision);
-                log.Write("OUTPUT_BUFFER_COMPLETE");
-                ShowActivity("비교 완료 — 텍스트 " + result.Code + " / LLM " + vision.Code + " / " + clock.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
-                    "초. 결과 비교 보기를 확인하세요 / 로그 첨부 가능");
+                int copied = outputSamples.Count(item => item.Buffer.Text != null);
+                int visibleEmpty = outputSamples.Count(item => item.Vision?.LocalVisibleEmpty == true);
+                ShowActivity("전체 완료 — " + outputSamples.Count + "개 중 원문 " + copied + "개 / 보이는 내용 없음 " + visibleEmpty + "개 / " +
+                    clock.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+                    "초. PID별 결과 확인 후 진단 ZIP 한 번 저장하세요." +
+                    (inventory.Omitted > 0 ? " 목록 한도 밖 " + inventory.Omitted + "개는 미수집입니다." : ""));
+                log.Write("OUTPUT_BATCH_COMPLETE", "targets=" + outputSamples.Count + " text=" + copied + " visible_empty=" + visibleEmpty + " omitted=" + inventory.Omitted);
             }
             catch (OperationCanceledException)
             {
-                try { log.Write("OUTPUT_BUFFER_CANCELLED"); } catch { }
-                if (!closing && ReferenceEquals(snapshotCancellation, cancellation)) ShowActivity("Output 전체 읽기 취소/시간 제한 — 로그 첨부 가능");
+                if (!closing) ShowActivity("전체 수집 중지 — 완료된 결과는 유지하며, 미실행 대상은 NOT_ATTEMPTED입니다.");
+                log.Write("OUTPUT_BATCH_CANCELLED");
             }
             catch
             {
-                try { log.Write("OUTPUT_BUFFER_FAILED"); } catch { }
-                if (!closing && ReferenceEquals(snapshotCancellation, cancellation)) ShowActivity("Output 전체 읽기 실패 — 로그 첨부 가능");
+                if (!closing) ShowActivity("전체 수집 실패 — 완료된 결과와 로그를 확인하세요.");
+                log.Write("OUTPUT_BATCH_FAILED");
             }
             finally
             {
                 cancellation.Cancel();
-                if (visionTask != null) { try { await visionTask; } catch { } }
-                bool current = ReferenceEquals(snapshotCancellation, cancellation);
-                if (current) snapshotCancellation = null;
+                if (ReferenceEquals(snapshotCancellation, cancellation)) snapshotCancellation = null;
                 cancellation.Dispose();
-                if (current && !closing && !IsDisposed) UpdateButtons();
+                batchInProgress = false;
+                if (!closing && !IsDisposed)
+                {
+                    outputTargets.Items.Clear();
+                    foreach (var sample in outputSamples) outputTargets.Items.Add(sample);
+                    if (outputTargets.Items.Count > 0) outputTargets.SelectedIndex = 0;
+                    UpdateButtons();
+                }
             }
         }
 
@@ -751,8 +758,11 @@ namespace RemoteMonitorSlave
             visionPreview.Enabled = vision != null; // The comparison is a snapshot; enable only after both paths finish.
             powerSi.Text = "출처: " + result.Method + " / " + result.Code + " / " + result.CharacterCount.ToString(CultureInfo.InvariantCulture) +
                 "자 / " + result.LineCount.ToString(CultureInfo.InvariantCulture) + "줄 / LLM " + (vision?.Code ?? "대기 중") + "\r\n" +
-                (result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
-                    result.Method == "AUTO_CLIPBOARD" ? "자동 복사본 — 학습한 위치를 다시 확인한 뒤 클릭·Ctrl+A·Ctrl+C를 한 번 실행했습니다. 클립보드가 바뀌었습니다.\r\n" :
+                (result.Code == "OUTPUT_VISIBLE_EMPTY" ? "보이는 Output 내용 없음 — 전체 버퍼 미확인, 클릭·복사·OCR 생략.\r\n" :
+                    result.Code == "SC_MINIMIZED" ? "선택된 PowerSI 창을 Windows가 최소화 상태로 보고하여 활성화·입력을 생략했습니다. 창이 열려 있었다면 진단 ZIP으로 식별값을 확인합니다.\r\n" :
+                    result.Method == "USER_CLIPBOARD" ? "수동 복사본 — Output에서 Ctrl+A로 선택했는지 확인하세요.\r\n" :
+                    result.Method == "AUTO_CLIPBOARD" ? "자동 복사본 — 선택 해제 → 판독용 캡처 → Ctrl+A/C → 선택 해제. 클립보드가 바뀌었습니다.\r\n" :
+                    result.Method == "PREVIOUS_CAPTURE" ? "이번 자동 복사 실패 — 이전 수집본을 참고용으로 유지합니다. 현재 화면보다 오래된 내용입니다.\r\n" :
                     "컨트롤이 현재 보유한 텍스트입니다. 과거에 버린 로그까지 복원하는 것은 아닙니다.\r\n") +
                 (result.Text == null ? "미수집: " + result.Detail :
                     (result.Text.Length > 4000 ? "[아래는 끝부분 미리보기 — 결과 비교 보기에서 전체 확인]\r\n" + result.Text.Substring(result.Text.Length - 4000) : result.Text));
@@ -761,7 +771,8 @@ namespace RemoteMonitorSlave
 
         private bool CanReplayVision()
         {
-            return !closing && !busy && server == null && snapshotCancellation == null && lastBuffer != null && lastObservation?.LocalFrame != null;
+            return !closing && !busy && !batchInProgress && server == null && snapshotCancellation == null && lastBuffer != null &&
+                lastObservation?.LocalFrame != null && !lastObservation.LocalVisibleEmpty;
         }
 
         private async Task ReplayVision()
@@ -852,8 +863,12 @@ namespace RemoteMonitorSlave
                 vision.LocalOcrSampleId = lastObservation.LocalOcrSampleId;
                 vision.LocalRegionInfo = lastObservation.LocalRegionInfo;
                 vision.LocalCaptureInfo = lastObservation.LocalCaptureInfo;
+                vision.LocalOutputBody = lastObservation.LocalOutputBody;
+                vision.LocalFrameSize = lastObservation.LocalFrameSize;
+                vision.LocalBodyDiagnostics = lastObservation.LocalBodyDiagnostics;
             }
             RenderOutputBuffer(buffer, vision, receivedUtc);
+            SaveSelectedSample();
             return true;
         }
 
@@ -869,8 +884,8 @@ namespace RemoteMonitorSlave
                     visionSettings = dialog.Result;
                     log.Write("VISION_SETTINGS_SAVED");
                     UpdateAnchorState();
-                    ShowActivity(CanReplayVision() ? "설정 저장 완료 — 같은 화면 재판독으로 저장한 화면을 현재 모델과 비교하세요." :
-                        "설정 저장 완료 — 두 방식 비교로 캡처·모델 판독·전체 텍스트를 함께 확인합니다.");
+                    ShowActivity(CanReplayVision() ? "설정 저장 완료 — " + replayVision.Text + "으로 현재 모델을 비교하세요. 기준 원문과 이미지는 유지됩니다." :
+                        "설정 저장 완료 — 새 화면 두 방식 비교로 캡처·모델 판독·전체 텍스트를 함께 확인합니다.");
                 }
                 catch { ShowActivity("LM Studio 설정 저장 실패. 이전 설정을 유지합니다."); }
             }
@@ -902,29 +917,25 @@ namespace RemoteMonitorSlave
         // The evidence text starts with fixed local headers; only the transcript lines take part in the comparison.
         private static string TranscriptOf(PowerSiObservation run)
         {
-            var evidence = run == null ? null : run.LocalEvidence;
+            if (run == null || run.Code != "OUTPUT_READ" || !run.OutputExposed || run.LocalFailure != null) return null;
+            var evidence = run.LocalEvidence;
             if (string.IsNullOrEmpty(evidence)) return null;
             var lines = evidence.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
-            int start = 0;
-            while (start < lines.Length && IsEvidenceHeader(lines[start])) start++;
+            // Strip only the successful OCR envelope. Rejected raw responses remain local diagnostic evidence.
+            int start = lines.Length >= 2 && lines[0] == "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]" &&
+                lines[1].StartsWith("캡처 UTC ", StringComparison.Ordinal) ? 2 : 0;
             if (start >= lines.Length) return null;
             var transcript = string.Join("\r\n", lines, start, lines.Length - start);
             return string.IsNullOrWhiteSpace(transcript) ? null : transcript;
         }
 
-        private static bool IsEvidenceHeader(string line)
-        {
-            return line.StartsWith("[", StringComparison.Ordinal) || line.StartsWith("캡처 UTC ", StringComparison.Ordinal) ||
-                line.StartsWith("Local failure: ", StringComparison.Ordinal) || line.StartsWith("Slave 내부", StringComparison.Ordinal);
-        }
-
         // Rendered once per run and kept for the bundle. Only the T1 counters reach the log.
-        private string ComparisonFor(PowerSiObservation run)
+        private string ComparisonFor(PowerSiObservation run, OutputBufferResult source = null)
         {
             if (run == null) return null;
             string existing;
             if (comparisonReports.TryGetValue(run, out existing)) return existing;
-            var full = lastBuffer == null ? null : lastBuffer.Text;
+            var full = (source ?? lastBuffer)?.Text;
             var transcript = TranscriptOf(run);
             if (string.IsNullOrEmpty(full) || transcript == null) return null;
             string rendered;
@@ -939,25 +950,29 @@ namespace RemoteMonitorSlave
             return rendered;
         }
 
-        private DiagnosticBundleContent BuildBundleContent(PowerSiObservation[] runs)
+        private DiagnosticBundleContent BuildBundleContent(PowerSiObservation[] runs, OutputSample sample = null)
         {
-            var buffer = lastBuffer;
+            var buffer = sample == null ? lastBuffer : sample.Buffer;
             var content = new DiagnosticBundleContent
             {
                 Version = LinkVersion.Value,
                 CreatedUtc = DateTime.UtcNow,
+                TargetPid = sample?.Process.Pid,
+                TargetStartUtcTicks = sample?.Process.StartUtcTicks,
+                TargetSessionId = sample?.SessionId,
                 BufferCode = buffer == null ? null : buffer.Code,
                 BufferMethod = buffer == null ? null : buffer.Method,
                 BufferDetail = buffer == null ? null : buffer.Detail,
+                BufferReceivedUtc = buffer == null ? (DateTime?)null : sample?.ReceivedUtc ?? lastBufferReceivedUtc,
                 FullText = buffer == null ? null : buffer.Text,
                 LogFilePath = log.Path,
-                AutoCopyFramePng = autoCopyFrame,
-                AutoCopyLastFailure = autoCopyFailure,
-                Notes = "자동 복사 위치: " + AnchorStateText() + " / 최근 자동 복사: " + (lastAutoCopyCode ?? "없음") +
+                AutoCopyFramePng = sample == null ? autoCopyFrame : sample.FailureFrame,
+                AutoCopyLastFailure = sample == null ? autoCopyFailure : sample.Failure,
+                Notes = "자동 복사 위치: 매번 자동 탐색" +
                     " / 자동 복사 설정: " +
                     (visionSettings.AutoCopyEnabled ? "사용" : "꺼짐") + " / 전체 텍스트: " +
                     (buffer == null ? "없음" : buffer.Code + " " + buffer.Method + " " + buffer.Detail) +
-                    " / v" + LinkVersion.Value + "의 자동 복사·대조는 현장 미검증입니다."
+                    " / 입력 이미지와 마지막 줄을 직접 대조하세요. 한 번의 성공이 연속 무인 운용이나 전체 전사 정확도를 보증하지 않습니다."
             };
             for (int index = 0; runs != null && index < runs.Length; index++)
             {
@@ -972,19 +987,34 @@ namespace RemoteMonitorSlave
                     Mode = run.LocalVisionMode,
                     RegionInfo = run.LocalRegionInfo,
                     BodyDiagnostics = run.LocalBodyDiagnostics,
-                    Result = run.Code,
+                    Result = run.LocalVisibleEmpty ? "OUTPUT_VISIBLE_EMPTY" : run.Code,
                     FailureCode = run.LocalFailure,
                     FullFramePng = run.LocalFullImage,
                     SuggestedPng = run.LocalSuggestedImage,
                     BodyPng = run.LocalPaneImage,
                     OcrInputPng = run.LocalImage,
                     Transcript = TranscriptOf(run),
-                    TranscriptValidated = run.LocalFailure == null && run.OutputExposed,
-                    Comparison = ComparisonFor(run),
+                    TranscriptValidated = run.Code == "OUTPUT_READ" && run.LocalFailure == null && run.OutputExposed,
+                    Comparison = ComparisonFor(run, buffer),
                     Metadata = "VISION_RUN" + SlaveLog.ComparisonMetadata(run)
                 });
             }
             return content;
+        }
+
+        private DiagnosticBundleContent BuildExportContent(PowerSiObservation[] runs)
+        {
+            if (outputSamples.Count == 0) return BuildBundleContent(runs);
+            SaveSelectedSample();
+            var batch = new DiagnosticBundleContent { Version = LinkVersion.Value, CreatedUtc = DateTime.UtcNow,
+                LogFilePath = log.Path, Notes = "PID별 독립 수집. PENDING은 Windows 응답 없음이며 내부 시뮬레이션 상태 판정이 아닙니다." };
+            foreach (var sample in outputSamples)
+            {
+                var target = BuildBundleContent(sample.Runs.ToArray(), sample);
+                target.LogFilePath = null;
+                batch.Targets.Add(target);
+            }
+            return batch;
         }
 
         private void SaveDiagnosticBundle(Form owner, PowerSiObservation[] runs)
@@ -1004,7 +1034,7 @@ namespace RemoteMonitorSlave
                     byte[] bytes;
                     using (var memory = new MemoryStream())
                     {
-                        DiagnosticBundle.Write(memory, BuildBundleContent(runs));
+                        DiagnosticBundle.Write(memory, BuildExportContent(runs));
                         bytes = memory.ToArray();
                     }
                     File.WriteAllBytes(dialog.FileName, bytes);
@@ -1024,7 +1054,7 @@ namespace RemoteMonitorSlave
 
         private Form CreateComparisonDialog()
         {
-                var dialog = new Form { Text = Program.Title + " — 전체 텍스트 / LLM 화면 판독 비교 (시각 차이 주의)",
+                var dialog = new Form { Text = Program.Title + (selectedSample == null ? "" : " — PID " + selectedSample.Process.Pid) + " — 전체 텍스트 / LLM 화면 판독 비교 (시각 차이 주의)",
                     ClientSize = new Size(1180, 740), StartPosition = FormStartPosition.CenterParent, Font = Font };
                 try
                 {
@@ -1032,9 +1062,11 @@ namespace RemoteMonitorSlave
                     dialog.Controls.Add(columns); columns.SplitterDistance = 590;
                     columns.Panel1.Controls.Add(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, WordWrap = false,
                         ScrollBars = ScrollBars.Both, MaxLength = OutputBufferCapture.MaxCharacters,
-                        Text = lastBuffer.Text ?? "미수집: " + lastBuffer.Code + "\r\n" + lastBuffer.Detail });
+                        Text = lastBuffer.Text ?? (lastBuffer.Code == "OUTPUT_VISIBLE_EMPTY" ?
+                            "보이는 Output 내용 없음\r\n전체 버퍼는 미확인입니다. 불필요한 클릭·복사·OCR은 생략했습니다." :
+                            "미수집: " + lastBuffer.Code + "\r\n" + lastBuffer.Detail) });
                     columns.Panel1.Controls.Add(new Label { Dock = DockStyle.Top, Height = 54,
-                        Text = "전체 텍스트 / " + lastBuffer.Method + "\r\n수집 완료 UTC " + lastBufferReceivedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
+                        Text = (lastBuffer.Method == "PREVIOUS_CAPTURE" ? "이전 참고 원문 (이번 자동 복사 실패)" : "전체 텍스트") + " / " + lastBuffer.Method + "\r\n수집 완료 UTC " + lastBufferReceivedUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) +
                             " (버퍼 원자적 캡처 시각 아님)" });
                     var right = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
                     columns.Panel2.Controls.Add(right); right.SplitterDistance = 420;
@@ -1056,20 +1088,20 @@ namespace RemoteMonitorSlave
                             Text = selected?.LocalEvidence ?? selected?.LocalFailure ?? selected?.Summary ?? "LLM 판독 대기 중" });
                         texts.Panel2.Controls.Add(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, WordWrap = false, ScrollBars = ScrollBars.Both,
                             AccessibleName = "전사본과 전체 텍스트의 줄 단위 대조 결과",
-                            Text = ComparisonFor(selected) ?? "원문 대조 없음 — 전체 텍스트 또는 전사본이 없는 실행입니다." });
+                            Text = ComparisonFor(selected) ?? "원문 대조 없음 — 전체 텍스트 또는 정상 완료된 OCR 전사본이 없습니다. 실패 응답은 진단용입니다." });
                         texts.Panel2.Controls.Add(new Label { Dock = DockStyle.Top, Height = 22,
-                            Text = "원문 대조 — 전체 텍스트 기준 (Slave 화면/진단 묶음 전용)" });
+                            Text = "원문 대조 — 대응 행 검사만 수행 / 전체·최신 줄 전사 여부 미검증" });
                         AddVisionImages(right.Panel1, selected);
                     };
                     runSelector.SelectedIndex = runs.Length - 1;
                     var actions = new Panel { Dock = DockStyle.Bottom, Height = 44 };
                     var saveBundle = new Button { Text = "진단 묶음 저장…", Bounds = new Rectangle(12, 6, 170, 32),
                         AccessibleName = "화면 이미지와 Output 전체 텍스트를 포함한 진단 ZIP 저장" };
-                    saveBundle.Enabled = !string.IsNullOrEmpty(lastBuffer.Text) || runs.Any(run => run != null);
+                    saveBundle.Enabled = outputSamples.Count > 0 || !string.IsNullOrEmpty(lastBuffer.Text) || runs.Any(run => run != null);
                     saveBundle.Click += delegate { SaveDiagnosticBundle(dialog, runs); };
                     actions.Controls.Add(saveBundle);
                     actions.Controls.Add(new Label { Bounds = new Rectangle(194, 12, 960, 22),
-                        Text = "ZIP에는 PowerSI 화면 이미지와 Output 전체 텍스트가 들어갑니다. Git·외부 공유 금지, 소유자 판단으로만 전달하세요." });
+                        Text = "ZIP에는 모든 PID의 원문·이미지·결과가 포함됩니다. 다른 PID는 이 창을 닫고 메인 창의 결과 목록에서 선택하세요." });
                     dialog.Controls.Add(actions);
                     return dialog;
                 }
@@ -1081,7 +1113,7 @@ namespace RemoteMonitorSlave
             var picture = new PictureBox { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom,
                 AccessibleName = "LLM용으로 준비한 원본 또는 크롭 이미지" };
             var selector = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList,
-                AccessibleName = "Output 전체 본문, 문자 전사 입력, LLM 제안 영역 또는 PowerSI 전체 원본 선택" };
+                AccessibleName = "문자 전사 실제 입력, Output 전체 본문, LLM 제안 영역 또는 PowerSI 전체 원본 선택" };
             panel.Controls.Add(picture);
             panel.Controls.Add(new TextBox { Dock = DockStyle.Top, Height = 100, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
                 AccessibleName = "모델과 캡처 영역 및 판독 시간",
@@ -1099,8 +1131,8 @@ namespace RemoteMonitorSlave
                 using (var source = Image.FromStream(stream)) images.Add(new Bitmap(source));
                 selector.Items.Add(caption);
             }
-            Add(observation?.LocalPaneImage, "Output 전체 본문 — 제목줄 제외");
-            Add(observation?.LocalImage, observation?.LocalPaneImage == null ? "Output 크롭 — 문자 전사 입력 (영역 확인 필요)" : "문자 전사 입력 — 하단 확대");
+            Add(observation?.LocalImage, "문자 전사 실제 입력 — 하단 최대 256픽셀 / 이미지 안의 모든 줄 판독");
+            Add(observation?.LocalPaneImage, "Output 전체 본문 — 제목줄 제외 (OCR 입력은 하단 일부)");
             Add(observation?.LocalSuggestedImage, observation?.LocalVisionMode == "OCR_ONLY" ? "LLM 제안 영역 — 이전 실행에서 재사용" : "LLM 제안 영역 — 보정 전");
             Add(observation?.LocalFullImage, "PowerSI 전체 원본 — 영역 찾기 입력");
             selector.SelectedIndexChanged += delegate { picture.Image = images[selector.SelectedIndex]; };
@@ -1112,7 +1144,8 @@ namespace RemoteMonitorSlave
             return (observation?.LocalModelInfo?.Id ?? observation?.LocalModel ?? "모델 정보 없음") +
                 " / " + (observation?.LocalModelInfo?.Quantization ?? "양자화 미제공") +
                 " / " + ((observation?.LocalElapsedMs ?? 0) / 1000.0).ToString("0.00", CultureInfo.InvariantCulture) + "초" +
-                (observation?.LocalVisionMode == "OCR_ONLY" ? " / OCR만 (이전 크롭 재사용)" : "");
+                (observation?.LocalVisionMode == "OCR_ONLY" ? " / OCR만 (이전 크롭 재사용)" : "") +
+                " / thinking OFF 요청·실제 적용 미확인";
         }
 
         private static string FormatCpu(int? cpuPermille)
@@ -1161,15 +1194,20 @@ namespace RemoteMonitorSlave
 
         private void UpdateButtons()
         {
-            address.Enabled = !busy && !closing && server == null && snapshotCancellation == null;
+            outputTargets.Enabled = !batchInProgress && !busy && !closing && server == null && snapshotCancellation == null;
+            address.Enabled = !batchInProgress && !busy && !closing && server == null && snapshotCancellation == null;
             start.Enabled = address.Enabled && address.SelectedIndex >= 0;
             stop.Enabled = !closing && (server != null || snapshotCancellation != null);
             export.Enabled = !busy && !closing && server != null;
-            refresh.Enabled = !busy && !closing && snapshotCancellation == null;
-            powerSiCheck.Enabled = !busy && !closing && snapshotCancellation == null;
-            outputAll.Enabled = !busy && !closing && server == null && snapshotCancellation == null;
+            refresh.Enabled = !batchInProgress && !busy && !closing && snapshotCancellation == null;
+            powerSiCheck.Enabled = !batchInProgress && !busy && !closing && snapshotCancellation == null;
+            outputAll.Enabled = !batchInProgress && !busy && !closing && server == null && snapshotCancellation == null;
             replayVision.Enabled = CanReplayVision();
-            visionSetup.Enabled = !busy && !closing && server == null && snapshotCancellation == null;
+            replayVision.Text = lastObservation?.LocalImage == null ? "저장 화면 재판독" : "같은 OCR 이미지 재판독";
+            replayVision.AccessibleName = lastObservation?.LocalImage == null ?
+                "저장한 전체 화면으로 현재 LM Studio 모델의 Output 영역 찾기부터 재판독" :
+                "저장한 동일 OCR 이미지 바이트를 현재 LM Studio 모델로 문자 전사만 재판독. 새 캡처와 원문 복사 없음";
+            visionSetup.Enabled = !batchInProgress && !busy && !closing && server == null && snapshotCancellation == null;
         }
 
         protected override void Dispose(bool disposing)
@@ -1206,6 +1244,14 @@ namespace RemoteMonitorSlave
             {
                 Directory.CreateDirectory(directory);
                 VisionSettingsStore.SelfTest(directory);
+                using (var settingsForm = new LocalVisionSettingsForm(new LocalVisionSettings()))
+                {
+                    var thinkingNote = settingsForm.Controls.OfType<Label>().Single(label => label.AccessibleName == "thinking 비활성화 요청과 실제 적용 여부 구분");
+                    if (!thinkingNote.Text.Contains("실제 적용 여부는 확인할 수 없습니다") ||
+                        !thinkingNote.Text.Contains("LM Studio에서도 thinking을 끄고") ||
+                        settingsForm.Controls.Cast<Control>().Any(control => control.Bottom > settingsForm.ClientSize.Height))
+                        throw new InvalidOperationException("Vision settings hide the thinking distinction or clip controls.");
+                }
                 using (var form = new SlaveForm(directory))
                 {
                     if (!form.Text.Contains(LinkVersion.Value) || form.server != null || form.identity != null ||
@@ -1373,8 +1419,8 @@ namespace RemoteMonitorSlave
                             throw new InvalidOperationException("Comparison lost full text/OCR or clipped panels.");
                         var selector = right.Panel1.Controls.OfType<ComboBox>().Single();
                         var picture = right.Panel1.Controls.OfType<PictureBox>().Single();
-                        if (selector.SelectedIndex != 0 || !selector.Text.StartsWith("Output 크롭") || picture.Image.Size != new Size(20, 10))
-                            throw new InvalidOperationException("Comparison did not default to actual crop.");
+                        if (selector.SelectedIndex != 0 || !selector.Text.StartsWith("문자 전사 실제 입력") || picture.Image.Size != new Size(20, 10))
+                            throw new InvalidOperationException("Comparison did not default to the actual OCR input.");
                         selector.SelectedIndex = 1;
                         if (!selector.Text.StartsWith("PowerSI 전체") || picture.Image.Size != new Size(40, 30))
                             throw new InvalidOperationException("Full source context unavailable.");
@@ -1390,7 +1436,9 @@ namespace RemoteMonitorSlave
                     excerptVision.LocalPaneImage = PowerSiScreenCapture.Crop(savedFrame, new Rectangle(5, 10, 30, 15));
                     excerptVision.LocalSuggestedImage = PowerSiScreenCapture.Crop(savedFrame, new Rectangle(5, 10, 10, 5));
                     form.RenderOutputBuffer(fullBuffer, excerptVision, receivedUtc);
-                    if (!form.replayVision.Enabled) throw new InvalidOperationException("Completed combined capture was not replayable.");
+                    if (!form.replayVision.Enabled || form.replayVision.Text != "같은 OCR 이미지 재판독" ||
+                        !form.outputAll.Text.StartsWith("새 화면", StringComparison.Ordinal))
+                        throw new InvalidOperationException("Completed capture did not distinguish exact OCR replay from a fresh comparison.");
                     form.busy = true; form.UpdateButtons();
                     if (form.replayVision.Enabled) throw new InvalidOperationException("Replay enabled while busy.");
                     form.busy = false; form.closing = true; form.UpdateButtons();
@@ -1432,7 +1480,8 @@ namespace RemoteMonitorSlave
                         var runs = comparison.Controls.OfType<ComboBox>().Single();
                         var newerPicture = right.Panel1.Controls.OfType<PictureBox>().Single();
                         if (runs.SelectedIndex != 1 || !runs.Text.Contains("gemma-31b / Q6_K / 2.00") ||
-                            Transcript(right).Text != largerModel.LocalEvidence || newerPicture.Image.Size != new Size(32, 16))
+                            !runs.Text.Contains("thinking OFF 요청·실제 적용 미확인") ||
+                            Transcript(right).Text != largerModel.LocalEvidence || newerPicture.Image.Size != new Size(20, 10))
                             throw new InvalidOperationException("Comparison did not select the latest model result.");
                         runs.SelectedIndex = 0;
                         var images = right.Panel1.Controls.OfType<ComboBox>().Single();
@@ -1441,11 +1490,11 @@ namespace RemoteMonitorSlave
                             columns.Panel1.Controls.OfType<TextBox>().Single().Text != fullBuffer.Text ||
                             Transcript(right).Text != excerptVision.LocalEvidence ||
                             !ReferenceEquals(form.lastObservation, largerModel) || !ReferenceEquals(form.lastBuffer, fullBuffer) ||
-                            images.Items.Count != 4 || !images.Text.StartsWith("Output 전체 본문") || picture.Image.Size != new Size(30, 15))
+                            images.Items.Count != 4 || !images.Text.StartsWith("문자 전사 실제 입력") || picture.Image.Size != new Size(20, 10))
                             throw new InvalidOperationException("Run selection changed saved state, leaked controls, or displayed the wrong OCR/crop.");
                         images.SelectedIndex = 1;
-                        if (!images.Text.StartsWith("문자 전사 입력") || picture.Image.Size != new Size(20, 10))
-                            throw new InvalidOperationException("Actual OCR input was not available separately from the full Output pane.");
+                        if (!images.Text.StartsWith("Output 전체 본문") || picture.Image.Size != new Size(30, 15))
+                            throw new InvalidOperationException("The full Output pane was not available separately from the actual OCR input.");
                         images.SelectedIndex = 2;
                         if (!images.Text.StartsWith("LLM 제안") || picture.Image.Size != new Size(10, 5))
                             throw new InvalidOperationException("Raw model-proposed crop was not retained.");
@@ -1502,7 +1551,9 @@ namespace RemoteMonitorSlave
                         throw new InvalidOperationException("Output excerpt not displayed locally or leaked into log.");
                     var rejectedVision = PowerSiObservation.VisionUnavailable("VISION_INVALID_RESPONSE");
                     rejectedVision.LocalFailure = "CONTENT_TEXT_CONTROL";
-                    rejectedVision.LocalEvidence = "private-response-sentinel";
+                    rejectedVision.LocalEvidence = "[UNVALIDATED LM STUDIO RESPONSE — NOT USED AS SIMULATION STATUS]\r\n" +
+                        "Local failure: CONTENT_TEXT_CONTROL\r\nSlave 내부 확인용. 원문은 로그/메신저로 보내지 않습니다.\r\n" +
+                        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"private-response-sentinel\\u0000\"}}]}";
                     rejectedVision.LocalModel = "private-model-sentinel";
                     rejectedVision.LocalImage = new byte[] { 1, 2, 3 };
                     form.RenderPowerSi(rejectedVision);
@@ -1510,7 +1561,8 @@ namespace RemoteMonitorSlave
                     var privateLog = File.ReadAllText(form.log.Path);
                     if (!privateLog.Contains("code=VISION_RUN") || !privateLog.Contains("model_id=gemma-e4b") || !privateLog.Contains("quantization=Q4_K_M") ||
                         !privateLog.Contains(" sample=" + new string('A', 64)) || !privateLog.Contains(" ocr_sample=" + new string('B', 64)) ||
-                        !privateLog.Contains("mode=OCR_ONLY crop_reused=1 request_timeout_s=90"))
+                        !privateLog.Contains("mode=OCR_ONLY crop_reused=1 request_timeout_s=90") ||
+                        !privateLog.Contains("transcript_policy=ALL_VISIBLE_V1 thinking_requested=off thinking_effective=UNKNOWN ocr_max_tokens=4096"))
                         throw new InvalidOperationException("Selected model comparison metadata was not written to the log.");
                     if (!form.visionPreview.Enabled || !form.powerSi.Text.Contains("CONTENT_TEXT_CONTROL") ||
                         privateLog.Contains("private-response-sentinel") || privateLog.Contains("private-model-sentinel") ||
@@ -1526,6 +1578,22 @@ namespace RemoteMonitorSlave
                         var selector = right.Panel1.Controls.OfType<ComboBox>().Single();
                         if (selector.Items.Count != 1 || !selector.Text.StartsWith("PowerSI 전체"))
                             throw new InvalidOperationException("Failed localization displayed whole image as crop.");
+                        if (Transcript(right).Text != rejectedVision.LocalEvidence || !Comparison(right).Text.StartsWith("원문 대조 없음") ||
+                            TranscriptOf(rejectedVision) != null || form.comparisonReports.ContainsKey(rejectedVision) ||
+                            form.replayVision.Text != "저장 화면 재판독")
+                            throw new InvalidOperationException("Rejected JSON was compared as OCR text or lost its local diagnostic preview.");
+                    }
+                    var failedBundle = form.BuildBundleContent(new[] { rejectedVision });
+                    if (failedBundle.Runs[0].Transcript != null || failedBundle.Runs[0].Comparison != null || failedBundle.Runs[0].TranscriptValidated)
+                        throw new InvalidOperationException("Rejected JSON was included as a transcript or OCR mismatch report.");
+                    using (var memory = new MemoryStream())
+                    {
+                        DiagnosticBundle.Write(memory, failedBundle);
+                        memory.Position = 0;
+                        using (var archive = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Read))
+                            if (archive.Entries.Any(entry => entry.FullName.EndsWith("transcript.txt", StringComparison.Ordinal) ||
+                                entry.FullName.EndsWith("comparison.txt", StringComparison.Ordinal)))
+                                throw new InvalidOperationException("Rejected JSON created transcript/comparison files in the diagnostic ZIP.");
                     }
                     // Learned auto-copy position, 원문 대조 and the diagnostic bundle content.
                     PowerSiFrame bodyFrame;
@@ -1552,48 +1620,28 @@ namespace RemoteMonitorSlave
                     var anchorVision = PowerSiObservation.VisionLogExcerpt("AFS Current Frequency (MHz) = 860.000", DateTime.UtcNow);
                     anchorVision.LocalEvidence = "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]\r\n캡처 UTC 2026-09-11 00:00:00\r\n" +
                         "AFS Current Frequency (MHz) = 860.000\r\n마지막  줄";
+                    var bracketed = PowerSiObservation.VisionLogExcerpt("[Warning] 123\r\n[Done] 456", DateTime.UtcNow);
+                    bracketed.LocalEvidence =
+                        "[Output 하단 확대 판독 — LLM 전사본, 숫자 정확도 미검증]\r\n캡처 UTC 2026-09-11 00:00:00\r\n[Warning] 123\r\n[Done] 456";
+                    if (TranscriptOf(bracketed) != "[Warning] 123\r\n[Done] 456")
+                        throw new InvalidOperationException("Bracket-prefixed Output text was removed as an evidence header.");
+                    var unreadable = PowerSiObservation.VisionLogExcerpt(null, DateTime.UtcNow);
+                    unreadable.LocalEvidence = bracketed.LocalEvidence;
+                    bracketed.LocalFailure = "READ_CROP_FAILED";
+                    if (TranscriptOf(unreadable) != null || TranscriptOf(bracketed) != null)
+                        throw new InvalidOperationException("A local evidence envelope alone was accepted as successful OCR.");
                     anchorVision.LocalFrame = bodyFrame;
                     anchorVision.LocalFullImage = bodyFrame.Png;
                     anchorVision.LocalFrameSize = bodyFrame.PixelSize;
                     anchorVision.LocalBodyDiagnostics = "B2|600|420|3|1|1|0|0|1|0";
                     form.RenderOutputBuffer(copiedBuffer, anchorVision, DateTime.UtcNow);
-                    if (form.learnedAnchor != null || form.pendingAnchor != null || !form.anchorState.Text.Contains("자동 복사 위치: 없음"))
-                        throw new InvalidOperationException("Auto copy started with a position it never learned.");
-                    var learnedPoint = new OutputAnchor { Pid = 4321, StartUtcTicks = 9876, SessionId = 1,
-                        ClientPoint = new Point(200, 200), ClientSize = new Size(600, 420), LearnedUtc = DateTime.UtcNow };
-                    form.LearnOutputAnchor(learnedPoint, null);
-                    if (form.learnedAnchor != null || !ReferenceEquals(form.pendingAnchor, learnedPoint) ||
-                        !form.anchorState.Text.Contains("자동 복사 위치: 미확인"))
-                        throw new InvalidOperationException("Anchor without a captured frame was treated as confirmed.");
-                    form.LearnOutputAnchor(learnedPoint, anchorVision);
-                    if (!ReferenceEquals(form.learnedAnchor, learnedPoint) || form.pendingAnchor != null ||
-                        !form.anchorState.Text.Contains("자동 복사 위치: 학습됨"))
-                        throw new InvalidOperationException("Confirmed Output position was not learned.");
-                    // The confirmed body travels with the anchor (A2) so the worker can click its centre.
-                    if (!learnedPoint.HasBody || learnedPoint.Body != new Rectangle(20, 40, 360, 320) ||
-                        !learnedPoint.Serialize().StartsWith("A2|", StringComparison.Ordinal) ||
-                        !form.anchorState.Text.Contains("최근 자동 복사: 없음"))
-                        throw new InvalidOperationException("A confirmed anchor did not carry its body to the worker.");
-                    var sameInstance = new OutputAnchor { Pid = 4321, StartUtcTicks = 9876, SessionId = 1,
-                        ClientPoint = new Point(1, 1), ClientSize = new Size(40, 30), LearnedUtc = DateTime.UtcNow };
-                    form.LearnOutputAnchor(sameInstance, anchorVision);
-                    if (!ReferenceEquals(form.learnedAnchor, learnedPoint))
-                        throw new InvalidOperationException("An unconfirmed sample discarded the confirmed position of the same instance.");
-                    var running = new ProcessInventory { SessionId = 1,
-                        Items = new[] { new ProcessState { Pid = 4321, Name = "powersi", HasWindow = true, StartUtcTicks = 9876 } } };
-                    var restarted = new ProcessInventory { SessionId = 1,
-                        Items = new[] { new ProcessState { Pid = 4321, Name = "powersi", HasWindow = true, StartUtcTicks = 9999 } } };
-                    var otherSession = new ProcessInventory { SessionId = 2, Items = running.Items };
-                    if (!ReferenceEquals(form.MatchingAnchor(running), learnedPoint) || form.MatchingAnchor(restarted) != null ||
-                        form.MatchingAnchor(otherSession) != null || form.MatchingAnchor(new ProcessInventory { SessionId = 1 }) != null)
-                        throw new InvalidOperationException("A learned position survived a restarted or foreign PowerSI instance.");
                     using (var comparison = form.CreateComparisonDialog())
                     {
                         var columns = comparison.Controls.OfType<SplitContainer>().Single();
                         var right = columns.Panel2.Controls.OfType<SplitContainer>().Single();
                         var report = Comparison(right).Text;
                         if (!report.StartsWith("전사본 2행 대조") || !report.Contains("일치 1") || !report.Contains("정규화 일치 1") ||
-                            !report.Contains("누락 0") || !report.Contains("860.000") ||
+                            !report.Contains("원문 대응 없음 0") || !report.Contains("전체 줄·최신 줄 전사 여부: 미검증") || !report.Contains("860.000") ||
                             Transcript(right).Text != anchorVision.LocalEvidence)
                             throw new InvalidOperationException("원문 대조 did not compare the transcript against the collected full text.");
                         var bundleButton = comparison.Controls.OfType<Panel>().Single().Controls.OfType<Button>().Single();
@@ -1605,16 +1653,16 @@ namespace RemoteMonitorSlave
                     form.autoCopyFrame = bodyFrame.Png;
                     form.autoCopyFailure = "AUTO_COPY_OCCLUDED OCCLUDER|SELF";
                     form.UpdateAnchorState();
-                    if (!form.anchorState.Text.Contains("최근 자동 복사: AUTO_COPY_OCCLUDED") ||
-                        !form.anchorState.Text.Contains("자동 복사 위치: 학습됨"))
+                    if (!form.anchorState.Text.Contains("최근 결과: AUTO_COPY_OCCLUDED"))
                         throw new InvalidOperationException("Status line did not show the last auto copy outcome.");
                     var bundle = form.BuildBundleContent(new[] { anchorVision });
-                    if (bundle.FullText != copiedBuffer.Text || bundle.LogFilePath != form.log.Path || bundle.Runs.Count != 1 ||
+                    if (bundle.FullText != copiedBuffer.Text || bundle.BufferReceivedUtc != form.lastBufferReceivedUtc ||
+                        bundle.LogFilePath != form.log.Path || bundle.Runs.Count != 1 ||
                         bundle.Runs[0].Comparison == null || bundle.Runs[0].Transcript == null ||
                         bundle.Runs[0].BodyDiagnostics != anchorVision.LocalBodyDiagnostics ||
                         !ReferenceEquals(bundle.AutoCopyFramePng, bodyFrame.Png) ||
                         bundle.AutoCopyLastFailure != "AUTO_COPY_OCCLUDED OCCLUDER|SELF" ||
-                        !bundle.Notes.Contains("최근 자동 복사: AUTO_COPY_OCCLUDED") ||
+                        bundle.Notes.Contains("최근 자동 복사:") ||
                         !bundle.Runs[0].Metadata.StartsWith("VISION_RUN") || !bundle.Runs[0].Metadata.Contains("frame=600x420") ||
                         !bundle.Runs[0].Metadata.Contains("body=B2|600|420") || bundle.Version != LinkVersion.Value)
                         throw new InvalidOperationException("Diagnostic bundle content lost the run, comparison or metadata.");
@@ -1630,17 +1678,94 @@ namespace RemoteMonitorSlave
                                 throw new InvalidOperationException("Diagnostic bundle did not contain the exported screen/text entries.");
                     }
                     var comparisonLog = File.ReadAllText(form.log.Path);
-                    if (!comparisonLog.Contains("code=OUTPUT_ANCHOR_LEARNED") || !comparisonLog.Contains("code=OUTPUT_ANCHOR_UNCONFIRMED") ||
-                        !comparisonLog.Contains("reason=FRAME_MISSING") || !comparisonLog.Contains("reason=SIZE_MISMATCH") ||
-                        !comparisonLog.Contains("code=TRANSCRIPT_COMPARE summary=T1|2|1|1|0|0|0|1") ||
+                    if (!comparisonLog.Contains("code=TRANSCRIPT_COMPARE summary=T1|2|1|1|0|0|0|1") ||
                         comparisonLog.Contains("860.000") || comparisonLog.Contains("마지막"))
                         throw new InvalidOperationException("Anchor/comparison logging lost its metadata or leaked Output text.");
-                    var foreignInstance = new OutputAnchor { Pid = 999, StartUtcTicks = 1, SessionId = 1,
-                        ClientPoint = new Point(1, 1), ClientSize = new Size(40, 30), LearnedUtc = DateTime.UtcNow };
-                    form.LearnOutputAnchor(foreignInstance, anchorVision);
-                    if (form.learnedAnchor != null || !ReferenceEquals(form.pendingAnchor, foreignInstance) ||
-                        !form.anchorState.Text.Contains("자동 복사 위치: 미확인"))
-                        throw new InvalidOperationException("A different PowerSI instance kept the previous learned position.");
+                    form.log.Write("OUTPUT_PREPARE", "pid=101 stage=selected hwnd=123 iconic=1 x=-32000 y=-32000");
+                    form.log.Write("OUTPUT_PREPARE", "title=private/path");
+                    var stateLog = File.ReadAllText(form.log.Path);
+                    if (!stateLog.Contains("iconic=1 x=-32000 y=-32000") || stateLog.Contains("private/path"))
+                        throw new InvalidOperationException("Signed native window metadata was lost or private text accepted.");
+                    form.RenderOutputBuffer(new OutputBufferResult { Code = "SC_MINIMIZED", Method = "NONE", Detail = "NONE" });
+                    if (!form.powerSi.Text.Contains("Windows가 최소화 상태로 보고") || !form.powerSi.Text.Contains("활성화·입력을 생략"))
+                        throw new InvalidOperationException("Minimized window diagnosis was not explained in the UI.");
+                    var first = new OutputSample { Process = new ProcessState { Pid = 101, StartUtcTicks = 1001 }, SessionId = 1,
+                        Buffer = copiedBuffer, Vision = anchorVision, ReceivedUtc = DateTime.UtcNow };
+                    first.Runs.Add(anchorVision);
+                    var secondVision = PowerSiObservation.VisionLogExcerpt("SECOND 789", DateTime.UtcNow);
+                    secondVision.LocalEvidence = "SECOND 789";
+                    var second = new OutputSample { Process = new ProcessState { Pid = 202, StartUtcTicks = 2002 }, SessionId = 1,
+                        Buffer = new OutputBufferResult { Code = "AUTO_COPY_READ", Method = "AUTO_CLIPBOARD", Text = "SECOND 789", CharacterCount = 10, LineCount = 1 },
+                        Vision = secondVision, ReceivedUtc = DateTime.UtcNow };
+                    second.Runs.Add(secondVision);
+                    form.outputSamples.AddRange(new[] { first, second });
+                    form.SelectOutputSample(first);
+                    form.SelectOutputSample(second);
+                    if (form.lastBuffer.Text != "SECOND 789" || !form.ComparisonFor(secondVision).Contains("일치 1"))
+                        throw new InvalidOperationException("Target selection mixed instance buffers or comparisons.");
+                    var batch = form.BuildExportContent(new[] { secondVision });
+                    if (batch.Targets.Count != 2 || batch.Targets[0].FullText != copiedBuffer.Text || batch.Targets[1].FullText != "SECOND 789" ||
+                        batch.Targets[0].TargetPid != 101 || batch.Targets[1].TargetPid != 202)
+                        throw new InvalidOperationException("Batch export mixed per-instance evidence.");
+                    using (var memory = new MemoryStream())
+                    {
+                        DiagnosticBundle.Write(memory, batch); memory.Position = 0;
+                        using (var archive = new System.IO.Compression.ZipArchive(memory, System.IO.Compression.ZipArchiveMode.Read))
+                        {
+                            using (var reader = new StreamReader(archive.GetEntry("targets/01-pid101/full-text.txt").Open()))
+                                if (reader.ReadToEnd() != copiedBuffer.Text) throw new InvalidOperationException("First buffer lost in batch ZIP.");
+                            using (var reader = new StreamReader(archive.GetEntry("targets/02-pid202/full-text.txt").Open()))
+                                if (reader.ReadToEnd() != "SECOND 789") throw new InvalidOperationException("Second buffer lost in batch ZIP.");
+                            if (archive.GetEntry("full-text.txt") != null) throw new InvalidOperationException("Batch root exposed a misleading single buffer.");
+                        }
+                    }
+                    form.lastBuffer = new OutputBufferResult { Code = "SC_PENDING", Method = "NONE" };
+                    form.lastObservation = PowerSiObservation.VisionUnavailable("OUTPUT_UNAVAILABLE");
+                    form.lastObservation.LocalFailure = "PENDING_WINDOWS_NOT_RESPONDING_INPUT_STOPPED";
+                    form.comparisonRuns.Clear(); form.comparisonRuns.Add(form.lastObservation);
+                    form.SaveSelectedSample();
+                    form.batchInProgress = true;
+                    form.StopServer();
+                    if (form.outputAll.Enabled || form.outputTargets.Enabled || form.visionSetup.Enabled || form.refresh.Enabled)
+                        throw new InvalidOperationException("A cancelling batch permitted new work before input cleanup.");
+                    form.batchInProgress = false;
+                    batch = form.BuildExportContent(null);
+                    if (batch.Targets.Count != 2 || batch.Targets[0].FullText != copiedBuffer.Text || batch.Targets[1].FullText != null ||
+                        batch.Targets[1].BufferCode != "SC_PENDING" || batch.Targets[1].Runs[0].Transcript != null)
+                        throw new InvalidOperationException("Pending/Stop lost prior targets or reused another target's text.");
+                    var emptyVision = PowerSiObservation.VisionLogExcerpt(null, DateTime.UtcNow);
+                    emptyVision.LocalVisibleEmpty = true;
+                    emptyVision.LocalFrame = anchorVision.LocalFrame;
+                    emptyVision.LocalFullImage = anchorVision.LocalFullImage;
+                    emptyVision.LocalImage = anchorVision.LocalImage;
+                    if (!RecordVisibleEmpty(second, emptyVision) || RecordVisibleEmpty(first, anchorVision))
+                        throw new InvalidOperationException("Visible-empty routing changed a nonempty target.");
+                    foreach (var failure in new[] { "TARGET_CANCELLED", "TARGET_TIMEOUT" }) RecordTargetFailure(second, failure);
+                    if (second.Buffer.Code != "OUTPUT_VISIBLE_EMPTY" || second.Buffer.Text != null || second.Vision.LocalFailure != null)
+                        throw new InvalidOperationException("Stop or timeout discarded a completed visible-empty observation.");
+                    second.Runs.Clear(); second.Runs.Add(emptyVision);
+                    form.selectedSample = null;
+                    form.SelectOutputSample(second);
+                    batch = form.BuildExportContent(null);
+                    if (form.CanReplayVision() || form.ComparisonFor(emptyVision) != null ||
+                        second.Buffer.Text != null || !second.ToString().Contains("보이는 내용 없음") ||
+                        batch.Targets[0].FullText != copiedBuffer.Text || batch.Targets[1].FullText != null ||
+                        batch.Targets[1].BufferCode != "OUTPUT_VISIBLE_EMPTY" || batch.Targets[1].Runs[0].Result != "OUTPUT_VISIBLE_EMPTY" ||
+                        batch.Targets[1].Runs[0].Transcript != null || !SlaveLog.ComparisonMetadata(emptyVision).Contains("visible_empty=1"))
+                        throw new InvalidOperationException("Visible-empty evidence became full text, OCR success, or another PID's data.");
+                    Console.WriteLine("PASS: visible-empty target stays distinct from full-buffer success and preserves the other PID");
+                    form.SelectOutputSample(first);
+                    batch = form.BuildExportContent(null);
+                    if (!batch.Targets[0].Notes.Contains("USER_COPY_READ") || batch.Targets[0].Notes.Contains("OUTPUT_VISIBLE_EMPTY") ||
+                        !batch.Targets[1].Notes.Contains("OUTPUT_VISIBLE_EMPTY") || batch.Targets[1].Notes.Contains("USER_COPY_READ"))
+                        throw new InvalidOperationException("Diagnostic notes inherited another selected target's result.");
+                    Console.WriteLine("PASS: per-PID diagnostic notes remain independent of the selected target");
+                    var copyTime = first.ReceivedUtc;
+                    RecordTargetFailure(first, "TARGET_TIMEOUT");
+                    if (first.Buffer.Text != copiedBuffer.Text || first.ReceivedUtc != copyTime || first.Vision.LocalFailure != "TARGET_TIMEOUT" ||
+                        TranscriptOf(first.Vision) != null)
+                        throw new InvalidOperationException("Later OCR failure discarded independently collected full text or kept a valid transcript.");
+                    Console.WriteLine("PASS: two-target selection, independent comparisons/ZIP payloads, pending and Stop preservation");
                     form.ClearPowerSi();
                     using (var reader = new FileStream(form.log.Path, FileMode.Open, FileAccess.Read, FileShare.None))
                         if (reader.Length == 0) throw new InvalidOperationException("Slave log unavailable while form alive.");

@@ -176,6 +176,34 @@ namespace RemoteMonitorLink
             }
         }
 
+        // ponytail: only an exactly uniform neutral body is visibly empty; a caret, texture or any ink
+        // remains unconfirmed. This says nothing about off-screen history or a custom control's buffer.
+        internal static bool IsVisiblyEmpty(PowerSiFrame frame, Rectangle body, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            ValidateFrame(frame);
+            using (var stream = new MemoryStream(PowerSiScreenCapture.Crop(frame, body), false))
+            using (var bitmap = new Bitmap(stream))
+            {
+                var first = bitmap.GetPixel(0, 0);
+                if (Math.Abs(first.R - first.G) > 3 || Math.Abs(first.R - first.B) > 3) return false;
+                var bits = bitmap.LockBits(new Rectangle(Point.Empty, bitmap.Size), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                try
+                {
+                    var row = new byte[bitmap.Width * 3];
+                    for (int y = 0; y < bitmap.Height; y++)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        Marshal.Copy(IntPtr.Add(bits.Scan0, y * bits.Stride), row, 0, row.Length);
+                        for (int x = 0; x < row.Length; x += 3)
+                            if (row[x] != first.B || row[x + 1] != first.G || row[x + 2] != first.R) return false;
+                    }
+                    return true;
+                }
+                finally { bitmap.UnlockBits(bits); }
+            }
+        }
+
         internal static byte[] OcrInput(PowerSiFrame frame, Rectangle body)
         {
             ValidateFrame(frame);
@@ -241,6 +269,22 @@ namespace RemoteMonitorLink
             }
             var body = new Rectangle(20, 40, 360, 320);
             var suggested = new Rectangle(100, 150, 360, 160);
+            using (var bitmap = new Bitmap(600, 420, PixelFormat.Format24bppRgb))
+            {
+                using (var graphics = Graphics.FromImage(bitmap)) graphics.Clear(Color.FromArgb(40, 40, 40));
+                Check(IsVisiblyEmpty(Frame(bitmap), body, CancellationToken.None), "uniform body is visibly empty only");
+                bitmap.SetPixel(body.Left, body.Top, Color.White);
+                Check(!IsVisiblyEmpty(Frame(bitmap), body, CancellationToken.None), "even first-pixel ink prevents empty classification");
+                bitmap.SetPixel(body.Left, body.Top, Color.FromArgb(40, 40, 40));
+                bitmap.SetPixel(body.Right - 1, body.Bottom - 1, Color.White);
+                Check(!IsVisiblyEmpty(Frame(bitmap), body, CancellationToken.None), "last-pixel ink is not missed");
+                using (var canceled = new CancellationTokenSource())
+                {
+                    canceled.Cancel();
+                    try { IsVisiblyEmpty(Frame(bitmap), body, canceled.Token); throw new InvalidOperationException("Canceled empty scan ran."); }
+                    catch (OperationCanceledException) { }
+                }
+            }
             foreach (int grey in new[] { 40, 232 })
             using (var bitmap = new Bitmap(600, 420, PixelFormat.Format24bppRgb))
             {
